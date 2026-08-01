@@ -1,121 +1,139 @@
 import discord
 from discord.ext import commands
 import os
-import traceback
+from openai import OpenAI
+import json
 
-print(">>> Iniciando reporte-de-pesadas-bot...")
+print(">>> Iniciando bot de reporte de pesadas...")
 
 # ================== CONFIGURACIÓN ==================
-TOKEN = os.getenv("TOKEN")
-
-if not TOKEN:
-    raise RuntimeError("❌ ERROR: Falta la variable de entorno TOKEN")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+if not DISCORD_TOKEN:
+    raise RuntimeError("❌ ERROR: Falta la variable de entorno DISCORD_TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.messages = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-reports = {}
+# Cliente de xAI (Grok)
+client = OpenAI(
+    api_key=os.getenv("XAI_API_KEY"),
+    base_url="https://api.x.ai/v1"
+)
 
-# ================== PREGUNTAS ==================
+# ================== ESTADO DE CONVERSACIÓN ==================
+conversation_state = {}
+
+# ================== LISTA DE PREGUNTAS ==================
 PREGUNTAS = [
-    "¿Con cuánta leche comenzó el día?",
-    "¿Con cuánta leche terminó el día?",
-    "¿Con cuánto azúcar comenzó el día?",
-    "¿Con cuánto azúcar terminó el día?",
-    "¿Con cuánto suero comenzó el día?",
-    "¿Con cuánto suero terminó el día?",
-    "¿Con cuánto cacao comenzó el día?",
-    "¿Con cuánto cacao terminó el día?",
-    "¿Cuántos adicionales dejaron hoy?",
-    "¿Las bandejas quedaron marcadas correctamente?",
-    "¿Recogiste los vasitos y las tapas del día anterior?",
-    "¿Anotaste en el cuaderno los vasos entregados hoy?",
-    "¿Dejaste las tapitas para los vasitos de helado que se van a producir hoy?",
-    "¿Las tapitas están correctamente ordenadas por líneas y sabores?",
-    "¿Qué productos están cerca de acabarse? (indica el producto y la cantidad aproximada que queda)",
-    "¿Hubo alguna incidencia, problema o área de mejora hoy?",
-    "¿Comentarios finales del día?"
+    "¿Cuántos kilos de azúcar se usaron?",
+    "¿Cuántos kilos de leche en polvo se usaron?",
+    "¿Cuántos kilos de grasa se usaron?",
+    "¿Cuántos kilos de estabilizante se usaron?",
+    "¿Cuántos kilos de saborizantes se usaron?",
+    "¿Cuántos kilos de colorantes se usaron?",
+    "¿Cuántos kilos de cacao se usaron?",
+    "¿Cuántos kilos de vainilla se usaron?",
+    "¿Cuántos kilos de otros ingredientes se usaron?",
+    "¿Cuántos kilos de base de helado se prepararon?",
+    "¿Cuántos kilos de mezcla final se obtuvieron?",
+    "¿Cuántos kilos de merma hubo?",
+    "¿Cuántos kilos de producto terminado se obtuvieron?",
+    "¿Cuántos kilos de producto se enviaron a congelación?",
+    "¿Cuántos kilos de producto se enviaron a empaque?",
+    "¿Cuántos kilos de producto se enviaron a venta?",
+    "¿Observaciones adicionales del proceso de pesadas?"
 ]
-
-
-class ReporteCancelado(Exception):
-    pass
-
-
-# ================== HELPER PARA OBTENER RESPUESTA ====================
-async def obtener_respuesta(channel, user):
-    msg = await bot.wait_for("message", check=lambda m: m.author == user and m.channel == channel)
-    contenido = msg.content.strip().lower()
-
-    # Detección flexible de cancelar
-    if "cancelar" in contenido:
-        await channel.send("✅ **Reporte de Pesadas cancelado.**\nPuedes iniciar uno nuevo con `/reporte-pesadas`.")
-        if user.id in reports:
-            del reports[user.id]
-        raise ReporteCancelado()
-
-    return msg
-
-
-# ================== FUNCIÓN PRINCIPAL ====================
-async def iniciar_reporte(channel, user):
-    if user.id in reports:
-        await channel.send("Ya tienes un reporte de pesadas en curso. Termínalo o cancélalo primero.")
-        return
-
-    reports[user.id] = {"answers": {}}
-
-    await channel.send(
-        f"📋 **Reporte de Pesadas iniciado** por {user.mention}\n\n"
-        "_Escribe **cancelar** en cualquier momento para detenerlo._"
-    )
-
-    try:
-        for i, pregunta in enumerate(PREGUNTAS, 1):
-            await channel.send(f"**{i}.** {pregunta}")
-            msg = await obtener_respuesta(channel, user)
-            await channel.send("✅")
-            reports[user.id]["answers"][f"q{i}"] = msg.content
-
-        await channel.send("✅ **Reporte de Pesadas completado. ¡Gracias!**")
-        if user.id in reports:
-            del reports[user.id]
-
-    except ReporteCancelado:
-        pass
-
 
 # ================== COMANDO SLASH ==================
 @bot.tree.command(name="reporte-pesadas", description="Inicia el Reporte de Pesadas")
-async def reporte_pesadas(interaction: discord.Interaction):
-    await iniciar_reporte(interaction.channel, interaction.user)
+async def reporte_pesadas_slash(interaction: discord.Interaction):
+    channel = interaction.channel
+    conversation_state[str(channel.id)] = {
+        "pregunta_actual": 0,
+        "respuestas": []
+    }
+    
+    await interaction.response.send_message(
+        f"**Reporte de Pesadas iniciado.**\n\n"
+        f"**Pregunta 1 de {len(PREGUNTAS)}:**\n"
+        f"{PREGUNTAS[0]}\n\n"
+        f"_Escribe **cancelar** o **cancelar reporte** en cualquier momento para detenerlo._"
+    )
 
+# ================== EVENTOS ==================
+@bot.event
+async def on_ready():
+    print(f'✅ Bot conectado como {bot.user}')
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ {len(synced)} slash commands sincronizados")
+    except Exception as e:
+        print(f"❌ Error al sincronizar: {e}")
 
-# ================== COMANDO POR TEXTO ==================
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
 
     content = message.content.strip().lower()
+    channel_id = str(message.channel.id)
 
-    if "reporte de pesadas" in content:
-        await iniciar_reporte(message.channel, message.author)
+    # Cancelar reporte
+    if "cancelar" in content:
+        if channel_id in conversation_state:
+            del conversation_state[channel_id]
+            await message.channel.send("✅ Reporte de Pesadas cancelado.")
+        return
 
-    await bot.process_commands(message)
+    # Iniciar por texto
+    if content in ["reporte de pesadas", "iniciar reporte de pesadas"]:
+        conversation_state[channel_id] = {
+            "pregunta_actual": 0,
+            "respuestas": []
+        }
+        await message.channel.send(
+            f"**Reporte de Pesadas iniciado.**\n\n"
+            f"**Pregunta 1 de {len(PREGUNTAS)}:**\n"
+            f"{PREGUNTAS[0]}\n\n"
+            f"_Escribe **cancelar** o **cancelar reporte** en cualquier momento para detenerlo._"
+        )
+        return
 
+    # Responder pregunta
+    if channel_id in conversation_state:
+        await manejar_respuesta(message)
 
-@bot.event
-async def on_ready():
-    print(f"✅ Bot conectado como {bot.user}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} slash commands sincronizados correctamente")
-    except Exception as e:
-        print(f"❌ Error al sincronizar comandos: {e}")
-        traceback.print_exc()
+# ================== MANEJO DE RESPUESTAS ==================
+async def manejar_respuesta(message):
+    channel_id = str(message.channel.id)
+    state = conversation_state[channel_id]
+    
+    # Guardar respuesta
+    state["respuestas"].append(message.content)
+    
+    # Enviar check
+    await message.channel.send("✅")
+    
+    # Avanzar a siguiente pregunta
+    state["pregunta_actual"] += 1
+    
+    if state["pregunta_actual"] < len(PREGUNTAS):
+        # Hay más preguntas
+        pregunta_num = state["pregunta_actual"] + 1
+        await message.channel.send(
+            f"**Pregunta {pregunta_num} de {len(PREGUNTAS)}:**\n"
+            f"{PREGUNTAS[state['pregunta_actual']]}"
+        )
+    else:
+        # Reporte completado
+        await message.channel.send(
+            "✅ **Reporte de Pesadas completado.**\n\n"
+            "Todas las respuestas han sido registradas. ¡Gracias!"
+        )
+        del conversation_state[channel_id]
 
-
-# ================== INICIO DEL BOT ==================
-bot.run(TOKEN)
+# ================== INICIO ==================
+bot.run(DISCORD_TOKEN)
