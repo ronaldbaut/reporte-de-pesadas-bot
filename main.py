@@ -26,25 +26,27 @@ client = OpenAI(
 # ================== ESTADO DE CONVERSACIÓN ==================
 conversation_state = {}
 
-# ================== LISTA DE PREGUNTAS ==================
+# ================== LISTA DE PREGUNTAS (CORREGIDA) ==================
 PREGUNTAS = [
-    "¿Cuántos kilos de azúcar se usaron?",
-    "¿Cuántos kilos de leche en polvo se usaron?",
-    "¿Cuántos kilos de grasa se usaron?",
-    "¿Cuántos kilos de estabilizante se usaron?",
-    "¿Cuántos kilos de saborizantes se usaron?",
-    "¿Cuántos kilos de colorantes se usaron?",
-    "¿Cuántos kilos de cacao se usaron?",
-    "¿Cuántos kilos de vainilla se usaron?",
-    "¿Cuántos kilos de otros ingredientes se usaron?",
-    "¿Cuántos kilos de base de helado se prepararon?",
-    "¿Cuántos kilos de mezcla final se obtuvieron?",
-    "¿Cuántos kilos de merma hubo?",
-    "¿Cuántos kilos de producto terminado se obtuvieron?",
-    "¿Cuántos kilos de producto se enviaron a congelación?",
-    "¿Cuántos kilos de producto se enviaron a empaque?",
-    "¿Cuántos kilos de producto se enviaron a venta?",
-    "¿Observaciones adicionales del proceso de pesadas?"
+    "¿Con cuánta leche comenzó el día?",
+    "¿Con cuánta leche terminó el día?",
+    "¿Con cuánto azúcar comenzó el día?",
+    "¿Con cuánto azúcar terminó el día?",
+    "¿Con cuánto suero comenzó el día?",
+    "¿Con cuánto suero terminó el día?",
+    "¿Con cuánto cacao comenzó el día?",
+    "¿Con cuánto cacao terminó el día?",
+    "¿Con cuánto arequipe comenzó el día?",
+    "¿Con cuánto arequipe terminó el día?",
+    "¿Cuántos adicionales dejaron hoy?",
+    "¿Las bandejas quedaron marcadas correctamente?",
+    "¿Recogiste los vasitos y las tapas del día anterior?",
+    "¿Anotaste en el cuaderno los vasos entregados hoy?",
+    "¿Dejaste las tapitas para los vasitos de helado que se van a producir hoy?",
+    "¿Las tapitas están correctamente ordenadas por líneas y sabores?",
+    "¿Qué productos están cerca de acabarse? (indica el producto y la cantidad aproximada que queda)",
+    "¿Hubo alguna incidencia, problema o área de mejora hoy?",
+    "¿Comentarios finales del día?"
 ]
 
 # ================== COMANDO SLASH ==================
@@ -89,7 +91,7 @@ async def on_message(message):
         return
 
     # Iniciar por texto
-    if content in ["reporte de pesadas", "iniciar reporte de pesadas"]:
+    if content in ["reporte de pesadas", "iniciar reporte de pesadas", "inicio reporte de pesadas"]:
         conversation_state[channel_id] = {
             "pregunta_actual": 0,
             "respuestas": []
@@ -122,9 +124,9 @@ Reglas:
 - Si la respuesta es muy corta, vacía, irrelevante o no responde claramente la pregunta → respuesta_valida = false
 - Cuando sea inválida, el campo "mensaje" debe decir de forma clara, simple y contundente qué falta.
   Ejemplos:
-  - "Te falta decirme la cantidad en kilos."
-  - "No me dijiste cuántos kilos se usaron."
-  - "Responde con un número de kilos."
+  - "Te falta decirme la cantidad."
+  - "No me dijiste con cuánto comenzó / terminó."
+  - "Responde con el número o la cantidad."
 - Sé directo y corto.
 - Si la respuesta es válida, pon "mensaje": null
 """
