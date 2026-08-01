@@ -81,8 +81,8 @@ async def on_message(message):
     content = message.content.strip().lower()
     channel_id = str(message.channel.id)
 
-    # Cancelar reporte
-    if "cancelar" in content:
+    # Cancelación flexible
+    if any(palabra in content for palabra in ["cancelar", "canelar", "cancel", "cancela", "cancelar reporte", "canelar reporte"]):
         if channel_id in conversation_state:
             del conversation_state[channel_id]
             await message.channel.send("✅ Reporte de Pesadas cancelado.")
@@ -106,29 +106,88 @@ async def on_message(message):
     if channel_id in conversation_state:
         await manejar_respuesta(message)
 
+# ================== FUNCIÓN QUE CONSULTA A GROK ==================
+async def consultar_grok(pregunta: str, respuesta_usuario: str) -> dict:
+    system_prompt = """
+Eres un supervisor estricto de reportes de pesadas en una fábrica de helados.
+
+Responde ÚNICAMENTE con un JSON válido:
+
+{
+  "respuesta_valida": true o false,
+  "mensaje": null o "texto"
+}
+
+Reglas:
+- Si la respuesta es muy corta, vacía, irrelevante o no responde claramente la pregunta → respuesta_valida = false
+- Cuando sea inválida, el campo "mensaje" debe decir de forma clara, simple y contundente qué falta.
+  Ejemplos:
+  - "Te falta decirme la cantidad en kilos."
+  - "No me dijiste cuántos kilos se usaron."
+  - "Responde con un número de kilos."
+- Sé directo y corto.
+- Si la respuesta es válida, pon "mensaje": null
+"""
+
+    user_content = f"""
+Pregunta actual:
+{pregunta}
+
+Respuesta del trabajador:
+"{respuesta_usuario}"
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="grok-4-1-fast",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"Error al consultar Grok: {e}")
+        return {
+            "respuesta_valida": True,
+            "mensaje": None
+        }
+
 # ================== MANEJO DE RESPUESTAS ==================
 async def manejar_respuesta(message):
     channel_id = str(message.channel.id)
     state = conversation_state[channel_id]
     
-    # Guardar respuesta
+    pregunta_actual = PREGUNTAS[state["pregunta_actual"]]
+    
+    # Reacción en vez de mensaje ✅
+    try:
+        await message.add_reaction("✅")
+    except:
+        pass
+
+    # Consultamos a Grok
+    decision = await consultar_grok(pregunta_actual, message.content)
+
+    # Si la respuesta no es válida → regaño y no avanzamos
+    if not decision.get("respuesta_valida", True):
+        mensaje = decision.get("mensaje") or "Tu respuesta está incompleta. Responde correctamente lo que se te preguntó."
+        await message.channel.send(mensaje)
+        return
+
+    # ===== Respuesta válida → guardamos y avanzamos =====
     state["respuestas"].append(message.content)
-    
-    # Enviar check
-    await message.channel.send("✅")
-    
-    # Avanzar a siguiente pregunta
     state["pregunta_actual"] += 1
     
     if state["pregunta_actual"] < len(PREGUNTAS):
-        # Hay más preguntas
         pregunta_num = state["pregunta_actual"] + 1
         await message.channel.send(
             f"**Pregunta {pregunta_num} de {len(PREGUNTAS)}:**\n"
             f"{PREGUNTAS[state['pregunta_actual']]}"
         )
     else:
-        # Reporte completado
         await message.channel.send(
             "✅ **Reporte de Pesadas completado.**\n\n"
             "Todas las respuestas han sido registradas. ¡Gracias!"
