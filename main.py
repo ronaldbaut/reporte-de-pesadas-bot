@@ -1,26 +1,30 @@
+import discord
+from discord.ext import commands
+import os
+import traceback
 from openai import OpenAI
 import json
 import re
 from typing import Optional
- 
+
 print(">>> Iniciando bot de reporte de pesadas...")
- 
+
 # ================== CONFIGURACIÓN ==================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise RuntimeError("❌ ERROR: Falta la variable de entorno DISCORD_TOKEN")
- 
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
- 
+
 bot = commands.Bot(command_prefix="!", intents=intents)
- 
+
 client = OpenAI(
     api_key=os.getenv("XAI_API_KEY"),
     base_url="https://api.x.ai/v1",
 )
- 
+
 # Estado por canal:
 # {
 #   "user_id": int,
@@ -29,7 +33,7 @@ client = OpenAI(
 #   "buffer": str,
 # }
 conversation_state = {}
- 
+
 # ================== PREGUNTAS + REGLAS ==================
 # tipo:
 #   cantidad      → número / peso (puede ir con unidades, potes, multilínea)
@@ -194,8 +198,8 @@ PREGUNTAS = [
         ),
     },
 ]
- 
- 
+
+
 # ================== HELPERS ==================
 def _vacio_o_basura(texto: str, tiene_adjuntos: bool) -> bool:
     t = (texto or "").strip()
@@ -204,8 +208,8 @@ def _vacio_o_basura(texto: str, tiene_adjuntos: bool) -> bool:
     if not t:
         return True
     return t.lower() in {".", "..", "...", "ok", "vale", "listo", "k", "ya", "-", "—"}
- 
- 
+
+
 def _parece_cancelar(content_lower: str) -> bool:
     patrones = [
         r"^cancelar(\s+reporte)?$",
@@ -216,8 +220,8 @@ def _parece_cancelar(content_lower: str) -> bool:
         r"^detener(\s+reporte)?$",
     ]
     return any(re.match(p, content_lower) for p in patrones)
- 
- 
+
+
 def _parece_inicio(content_lower: str) -> bool:
     return content_lower in {
         "reporte de pesadas",
@@ -226,13 +230,16 @@ def _parece_inicio(content_lower: str) -> bool:
         "/inicio reporte de pesadas",
         "/ inicio reporte de pesadas",
     }
- 
- 
+
+
 def _tiene_numero(texto: str) -> bool:
-    return bool(re.search(r"\d+([.,]\d+)?", texto or ""))
- 
- 
-def _es_si_no_corto(texto: str) -> bool | None:
+    if not texto:
+        return False
+    # Busca digitos con decimal opcional (punto o coma)
+    patron = r"\d+(?:[.,]\d+)?"
+    return re.search(patron, texto) is not None
+
+
 def _es_si_no_corto(texto: str) -> Optional[bool]:
     t = re.sub(r"[¡!?.]", "", (texto or "").strip().lower())
     if t in {"si", "sí", "yes", "s", "1", "correcto"}:
@@ -244,8 +251,8 @@ def _es_si_no_corto(texto: str) -> Optional[bool]:
     if re.match(r"^no\b", t) and len(t) <= 60:
         return False
     return None
- 
- 
+
+
 def _mensaje_inicio(user: discord.abc.User) -> str:
     n = len(PREGUNTAS)
     return (
@@ -255,8 +262,8 @@ def _mensaje_inicio(user: discord.abc.User) -> str:
         f"_Solo {user.display_name} puede responder este reporte._\n"
         f"_Escribe **cancelar** o **cancelar reporte** para detenerlo._"
     )
- 
- 
+
+
 def _crear_estado(user_id: int) -> dict:
     return {
         "user_id": user_id,
@@ -264,8 +271,8 @@ def _crear_estado(user_id: int) -> dict:
         "answers": {},
         "buffer": "",
     }
- 
- 
+
+
 async def iniciar_reporte(channel, user: discord.abc.User) -> bool:
     """Inicia por texto. True si arrancó, False si ya había uno."""
     channel_id = str(channel.id)
@@ -276,18 +283,17 @@ async def iniciar_reporte(channel, user: discord.abc.User) -> bool:
             f"Termínenlo o escriban **cancelar reporte**."
         )
         return False
- 
+
     conversation_state[channel_id] = _crear_estado(user.id)
     await channel.send(_mensaje_inicio(user))
     return True
- 
- 
+
+
 # ================== SLASH ==================
 # Discord exige responder la interacción en < 3 segundos.
 # Si el bot está caído o tarda, el usuario ve: "La aplicación no respondió".
 @bot.tree.command(name="reporte-pesadas", description="Inicia el Reporte de Pesadas")
 async def reporte_pesadas_slash(interaction: discord.Interaction):
-    # 1) Responder YA (antes de cualquier lógica lenta)
     try:
         channel_id = str(interaction.channel.id) if interaction.channel else None
         if not channel_id:
@@ -296,7 +302,7 @@ async def reporte_pesadas_slash(interaction: discord.Interaction):
                 ephemeral=True,
             )
             return
- 
+
         if channel_id in conversation_state:
             dueño = conversation_state[channel_id]["user_id"]
             await interaction.response.send_message(
@@ -305,18 +311,16 @@ async def reporte_pesadas_slash(interaction: discord.Interaction):
                 ephemeral=True,
             )
             return
- 
+
         # Estado + respuesta pública inmediata (cumple el deadline de Discord)
         conversation_state[channel_id] = _crear_estado(interaction.user.id)
         await interaction.response.send_message(_mensaje_inicio(interaction.user))
         print(f"[PESADAS] slash OK user={interaction.user.id} channel={channel_id}")
- 
+
     except discord.errors.NotFound:
-        # Interacción ya expiró (bot muy lento o caído al momento del click)
         print("[PESADAS] slash NotFound: interacción expirada (>3s)")
         return
     except discord.errors.InteractionResponded:
-        # Ya se respondió; intentar followup
         try:
             await interaction.followup.send(
                 "El reporte ya se estaba iniciando…", ephemeral=True
@@ -326,7 +330,6 @@ async def reporte_pesadas_slash(interaction: discord.Interaction):
     except Exception as e:
         print(f"[PESADAS] Error en slash: {e}")
         traceback.print_exc()
-        # Intentar avisar al usuario si aún no se respondió
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -342,35 +345,31 @@ async def reporte_pesadas_slash(interaction: discord.Interaction):
                 )
         except Exception:
             pass
- 
- 
+
+
 @bot.event
 async def on_ready():
     print(f"✅ Bot conectado como {bot.user} (id={bot.user.id})")
     print(f"   Guilds: {[g.name for g in bot.guilds]}")
     try:
-        # Sync global (puede tardar unos minutos en propagarse la 1ª vez)
         synced = await bot.tree.sync()
         print(f"✅ {len(synced)} slash commands sincronizados: {[c.name for c in synced]}")
     except Exception as e:
         print(f"❌ Error al sincronizar slash: {e}")
         traceback.print_exc()
- 
- 
+
+
 @bot.event
 async def on_error(event_method, *args, **kwargs):
     print(f"❌ on_error en {event_method}")
     traceback.print_exc()
- 
- 
+
+
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: Exception):
     print(f"❌ Error en app command: {error}")
     traceback.print_exc()
     try:
-        msg = (
-            "⚠️ Falló el comando. Escribe en el canal: **inicio reporte de pesadas**"
-        )
         msg = "⚠️ Falló el comando. Escribe en el canal: **inicio reporte de pesadas**"
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
@@ -378,20 +377,19 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
             await interaction.response.send_message(msg, ephemeral=True)
     except Exception:
         pass
- 
- 
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
- 
+
     content_lower = (message.content or "").strip().lower()
     channel_id = str(message.channel.id)
     state = conversation_state.get(channel_id)
- 
+
     if state and _parece_cancelar(content_lower):
         es_dueño = message.author.id == state["user_id"]
-        if es_dueño or content_lower in {"cancelar reporte", "reporte cancelado", "canelar reporte"}:
         if es_dueño or content_lower in {
             "cancelar reporte",
             "reporte cancelado",
@@ -400,21 +398,21 @@ async def on_message(message: discord.Message):
             del conversation_state[channel_id]
             await message.channel.send("✅ Reporte de Pesadas cancelado.")
         return
- 
+
     if _parece_inicio(content_lower):
         await iniciar_reporte(message.channel, message.author)
         return
- 
+
     if not state:
         return
- 
+
     # Solo el dueño avanza (evita que Tania/Martha “cierren” la pregunta del cacao)
     if message.author.id != state["user_id"]:
         return
- 
+
     await manejar_respuesta(message)
- 
- 
+
+
 # ================== GROK ==================
 async def consultar_grok(
     pregunta_item: dict,
@@ -429,7 +427,7 @@ Responde ÚNICAMENTE JSON:
   "respuesta_valida": true o false,
   "mensaje": null o "texto corto pidiendo SOLO lo que falta"
 }
- 
+
 Principios:
 1. Sé RAZONABLE. Evalúa si la INFORMACIÓN está, no si la frase es perfecta.
 2. Números con punto o coma (3.217 / 3,217) son válidos.
@@ -443,31 +441,31 @@ Principios:
 10. Nunca digas solo "Responde completo..." sin decir qué falta.
 11. Nunca digas "no me dijiste la cantidad" si hay un dígito claro en el texto.
 12. Punto "." solo → inválido.
- 
+
 Errores REALES que debes evitar:
 - Rechazar "3.217 pote / 2N 2C 2G" pidiendo de nuevo el cacao.
 - Rechazar desglose de adicionales pidiendo "un número".
 - Rechazar "Bandejas de un litro no hay".
 - Tragar mensajes de otras personas (eso lo filtra el código; tú solo validas el texto dado).
 """
- 
+
     user_content = f"""
 Pregunta:
 {pregunta_item["texto"]}
- 
+
 Tipo: {pregunta_item.get("tipo")}
 Reglas de esta pregunta:
 {pregunta_item.get("reglas", "")}
- 
+
 Tiene_adjuntos: {tiene_adjuntos}
- 
+
 BUFFER (intentos previos misma pregunta):
 \"\"\"{buffer or "(vacío)"}\"\"\"
- 
+
 Respuesta NUEVA:
 \"\"\"{respuesta_nueva}\"\"\"
 """
- 
+
     try:
         response = client.chat.completions.create(
             model="grok-4-1-fast",
@@ -492,25 +490,25 @@ Respuesta NUEVA:
                 "mensaje": "Escribe la respuesta con datos (no uses solo un punto).",
             }
         return {"respuesta_valida": True, "mensaje": None}
- 
- 
+
+
 # ================== MANEJO ==================
 async def manejar_respuesta(message: discord.Message):
     channel_id = str(message.channel.id)
     state = conversation_state.get(channel_id)
     if not state:
         return
- 
+
     paso = state["paso"]
     if paso < 0 or paso >= len(PREGUNTAS):
         del conversation_state[channel_id]
         return
- 
+
     item = PREGUNTAS[paso]
     texto = (message.content or "").strip()
     tiene_adjuntos = bool(message.attachments)
     tipo = item.get("tipo")
- 
+
     if _vacio_o_basura(texto, tiene_adjuntos):
         await message.channel.send(
             "Escribe la respuesta con datos (no uses solo un punto). "
@@ -518,63 +516,58 @@ async def manejar_respuesta(message: discord.Message):
             "Si no aplica, di **No** o **No hubo**."
         )
         return
- 
+
     # Atajos locales: menos tokens y menos rechazos absurdos
     sn = _es_si_no_corto(texto)
- 
+
     if tipo == "si_no" and sn is not None:
         await _aceptar_y_avanzar(message, state, texto)
         return
- 
+
     if tipo in {"abierta", "transferencia", "adicionales"} and sn is False:
-        # "No" / "Ninguno" / "Nada"
         await _aceptar_y_avanzar(message, state, texto)
         return
- 
+
     if tipo == "cantidad" and _tiene_numero(texto):
         # Número presente → aceptar (evita el bug del cacao 3.217 pote)
         await _aceptar_y_avanzar(message, state, texto)
         return
- 
+
     if tipo == "cantidad" and tiene_adjuntos and not texto:
         await message.channel.send(
             "Recibí la foto. Escribe también la **cantidad en número** "
             "(ej. 3,217) para poder registrar el dato."
         )
         return
- 
+
     if tipo == "stock_bajo":
-        # "no hay", listas con productos, o 0
-        if re.search(r"\bno\s+hay\b|\bninguno\b|\bnada\b|\b0\b", texto.lower()) or _tiene_numero(texto):
         if re.search(
             r"\bno\s+hay\b|\bninguno\b|\bnada\b|\b0\b", texto.lower()
         ) or _tiene_numero(texto):
             if len(texto) >= 3:
                 await _aceptar_y_avanzar(message, state, texto)
                 return
- 
+
     if tipo in {"adicionales", "transferencia"}:
-        # Desglose con al menos un número o "no"
         if _tiene_numero(texto) or sn is False:
             await _aceptar_y_avanzar(message, state, texto)
             return
         if sn is True:
-            # Dijo "sí" sin detalle en transferencia
             state["buffer"] = ((state.get("buffer") or "") + "\n" + texto).strip()
             await message.channel.send(
                 "Ok, hubo movimiento. Indica **qué productos** y **en qué cantidades**."
             )
             return
- 
+
     # Resto → Grok (con buffer)
     buffer_prev = state.get("buffer") or ""
     respuesta_para_ia = texto
     if tiene_adjuntos:
         nombres = ", ".join(a.filename for a in message.attachments)
         respuesta_para_ia = f"{texto}\n[Adjuntos: {nombres}]".strip()
- 
+
     decision = await consultar_grok(item, respuesta_para_ia, buffer_prev, tiene_adjuntos)
- 
+
     if not decision.get("respuesta_valida", False):
         state["buffer"] = (buffer_prev + "\n" + texto).strip() if buffer_prev else texto
         msg = decision.get("mensaje") or "Falta un dato. Completa solo lo que falta."
@@ -586,31 +579,30 @@ async def manejar_respuesta(message: discord.Message):
             "no me dijiste con cuánto comenzó / terminó.",
             "no me dijiste con cuánto cacao comenzó el día.",
         }:
-            # Si en realidad hay número, no castigar
             if _tiene_numero(state["buffer"]):
                 await _aceptar_y_avanzar(message, state, state["buffer"])
                 return
             msg = "Necesito la cantidad en número (puedes agregar notas en la misma respuesta)."
         await message.channel.send(msg)
         return
- 
+
     final = (buffer_prev + "\n" + texto).strip() if buffer_prev else texto
     await _aceptar_y_avanzar(message, state, final)
- 
- 
+
+
 async def _aceptar_y_avanzar(message: discord.Message, state: dict, texto_final: str):
     channel_id = str(message.channel.id)
     paso = state["paso"]
- 
+
     try:
         await message.add_reaction("✅")
     except Exception:
         pass
- 
+
     state["answers"][str(paso)] = texto_final
     state["buffer"] = ""
     state["paso"] = paso + 1
- 
+
     if state["paso"] < len(PREGUNTAS):
         n = state["paso"] + 1
         total = len(PREGUNTAS)
@@ -621,8 +613,15 @@ async def _aceptar_y_avanzar(message: discord.Message, state: dict, texto_final:
     else:
         await message.channel.send(
             "✅ **Reporte de Pesadas completado.**\n\n"
-            f"Todas las respuestas han sido registradas. ¡Gracias!\n"
             "Todas las respuestas han sido registradas. ¡Gracias!\n"
             f"_Respondido por <@{state['user_id']}>._"
         )
         print(
+            f"[PESADAS OK] channel={channel_id} "
+            f"answers={json.dumps(state['answers'], ensure_ascii=False)}"
+        )
+        del conversation_state[channel_id]
+
+
+# ================== INICIO ==================
+bot.run(DISCORD_TOKEN)
