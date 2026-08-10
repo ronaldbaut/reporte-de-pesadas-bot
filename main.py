@@ -1,18 +1,11 @@
-from discord.ext import commands
-import os
-import traceback
 from openai import OpenAI
 import json
 import re
+from typing import Optional
  
-print(">>> Iniciando reporte-de-pesadas-bot...")
 print(">>> Iniciando bot de reporte de pesadas...")
  
 # ================== CONFIGURACIÓN ==================
-TOKEN = os.getenv("TOKEN")
- 
-if not TOKEN:
-    raise RuntimeError("❌ ERROR: Falta la variable de entorno TOKEN")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise RuntimeError("❌ ERROR: Falta la variable de entorno DISCORD_TOKEN")
@@ -23,7 +16,6 @@ intents.messages = True
  
 bot = commands.Bot(command_prefix="!", intents=intents)
  
-reports = {}
 client = OpenAI(
     api_key=os.getenv("XAI_API_KEY"),
     base_url="https://api.x.ai/v1",
@@ -38,7 +30,6 @@ client = OpenAI(
 # }
 conversation_state = {}
  
-# ================== PREGUNTAS ==================
 # ================== PREGUNTAS + REGLAS ==================
 # tipo:
 #   cantidad      → número / peso (puede ir con unidades, potes, multilínea)
@@ -48,23 +39,6 @@ conversation_state = {}
 #   stock_bajo    → productos cerca de acabarse (acepta "no hay" = 0)
 #   abierta       → texto libre; "no"/"ninguna" OK
 PREGUNTAS = [
-    "¿Con cuánta leche comenzó el día?",
-    "¿Con cuánta leche terminó el día?",
-    "¿Con cuánto azúcar comenzó el día?",
-    "¿Con cuánto azúcar terminó el día?",
-    "¿Con cuánto suero comenzó el día?",
-    "¿Con cuánto suero terminó el día?",
-    "¿Con cuánto cacao comenzó el día?",
-    "¿Con cuánto cacao terminó el día?",
-    "¿Cuántos adicionales dejaron hoy?",
-    "¿Las bandejas quedaron marcadas correctamente?",
-    "¿Recogiste los vasitos y las tapas del día anterior?",
-    "¿Anotaste en el cuaderno los vasos entregados hoy?",
-    "¿Dejaste las tapitas para los vasitos de helado que se van a producir hoy?",
-    "¿Las tapitas están correctamente ordenadas por líneas y sabores?",
-    "¿Qué productos están cerca de acabarse? (indica el producto y la cantidad aproximada que queda)",
-    "¿Hubo alguna incidencia, problema o área de mejora hoy?",
-    "¿Comentarios finales del día?"
     {
         "texto": "¿Con cuánta leche comenzó el día?",
         "tipo": "cantidad",
@@ -222,8 +196,6 @@ PREGUNTAS = [
 ]
  
  
-class ReporteCancelado(Exception):
-    pass
 # ================== HELPERS ==================
 def _vacio_o_basura(texto: str, tiene_adjuntos: bool) -> bool:
     t = (texto or "").strip()
@@ -234,14 +206,6 @@ def _vacio_o_basura(texto: str, tiene_adjuntos: bool) -> bool:
     return t.lower() in {".", "..", "...", "ok", "vale", "listo", "k", "ya", "-", "—"}
  
  
-# ================== HELPER PARA OBTENER RESPUESTA ====================
-async def obtener_respuesta(channel, user):
-    # Usamos IDs para comparación robusta (funciona mejor con slash commands, hilos, etc.)
-    msg = await bot.wait_for(
-        "message",
-        check=lambda m: m.author.id == user.id and m.channel.id == channel.id
-    )
-    contenido = msg.content.strip().lower()
 def _parece_cancelar(content_lower: str) -> bool:
     patrones = [
         r"^cancelar(\s+reporte)?$",
@@ -253,14 +217,7 @@ def _parece_cancelar(content_lower: str) -> bool:
     ]
     return any(re.match(p, content_lower) for p in patrones)
  
-    # Detección flexible de cancelar (acepta "cancelar", "cancel", y frases que los contengan)
-    if "cancelar" in contenido or "cancel" in contenido:
-        await channel.send("✅ **Reporte de Pesadas cancelado.**\nPuedes iniciar uno nuevo con `/reporte-pesadas` o escribiendo `reporte de pesadas`.")
-        if user.id in reports:
-            del reports[user.id]
-        raise ReporteCancelado()
  
-    return msg
 def _parece_inicio(content_lower: str) -> bool:
     return content_lower in {
         "reporte de pesadas",
@@ -271,21 +228,12 @@ def _parece_inicio(content_lower: str) -> bool:
     }
  
  
-# ================== FUNCIÓN PRINCIPAL ====================
-async def iniciar_reporte(channel, user):
-    if user.id in reports:
-        await channel.send("Ya tienes un reporte de pesadas en curso. Termínalo o cancélalo primero.")
-        return
 def _tiene_numero(texto: str) -> bool:
     return bool(re.search(r"\d+([.,]\d+)?", texto or ""))
  
-    reports[user.id] = {"answers": {}}
  
-    await channel.send(
-        f"📋 **Reporte de Pesadas iniciado** por {user.mention}\n\n"
-        "_Escribe **cancelar** o **cancel** en cualquier momento para detenerlo._"
-    )
 def _es_si_no_corto(texto: str) -> bool | None:
+def _es_si_no_corto(texto: str) -> Optional[bool]:
     t = re.sub(r"[¡!?.]", "", (texto or "").strip().lower())
     if t in {"si", "sí", "yes", "s", "1", "correcto"}:
         return True
@@ -297,37 +245,10 @@ def _es_si_no_corto(texto: str) -> bool | None:
         return False
     return None
  
-    try:
-        for i, pregunta in enumerate(PREGUNTAS, 1):
-            await channel.send(f"**{i}.** {pregunta}")
-            msg = await obtener_respuesta(channel, user)
-            await channel.send("✅")
-            reports[user.id]["answers"][f"q{i}"] = msg.content
  
-        await channel.send("✅ **Reporte de Pesadas completado. ¡Gracias!**")
-        if user.id in reports:
-            del reports[user.id]
-async def iniciar_reporte(channel, user: discord.abc.User):
-    channel_id = str(channel.id)
-    if channel_id in conversation_state:
-        dueño = conversation_state[channel_id]["user_id"]
-        await channel.send(
-            f"Ya hay un reporte de pesadas en curso (iniciado por <@{dueño}>). "
-            f"Termínenlo o escriban **cancelar reporte**."
-        )
-        return
- 
-    except ReporteCancelado:
-        if user.id in reports:
-            del reports[user.id]
-    conversation_state[channel_id] = {
-        "user_id": user.id,
-        "paso": 0,
-        "answers": {},
-        "buffer": "",
-    }
+def _mensaje_inicio(user: discord.abc.User) -> str:
     n = len(PREGUNTAS)
-    await channel.send(
+    return (
         f"**Reporte de Pesadas iniciado** por {user.mention}\n\n"
         f"**Pregunta 1 de {n}:**\n"
         f"{PREGUNTAS[0]['texto']}\n\n"
@@ -336,41 +257,127 @@ async def iniciar_reporte(channel, user: discord.abc.User):
     )
  
  
-# ================== COMANDO SLASH ==================
-# ================== SLASH ==================
-@bot.tree.command(name="reporte-pesadas", description="Inicia el Reporte de Pesadas")
-async def reporte_pesadas(interaction: discord.Interaction):
-    # Responder inmediatamente a la interacción (evita "The application did not respond")
-async def reporte_pesadas_slash(interaction: discord.Interaction):
-    channel_id = str(interaction.channel.id)
+def _crear_estado(user_id: int) -> dict:
+    return {
+        "user_id": user_id,
+        "paso": 0,
+        "answers": {},
+        "buffer": "",
+    }
+ 
+ 
+async def iniciar_reporte(channel, user: discord.abc.User) -> bool:
+    """Inicia por texto. True si arrancó, False si ya había uno."""
+    channel_id = str(channel.id)
     if channel_id in conversation_state:
         dueño = conversation_state[channel_id]["user_id"]
-        await interaction.response.send_message(
-            f"Ya hay un reporte en curso (iniciado por <@{dueño}>).",
-            ephemeral=True,
+        await channel.send(
+            f"Ya hay un reporte de pesadas en curso (iniciado por <@{dueño}>). "
+            f"Termínenlo o escriban **cancelar reporte**."
         )
-        return
+        return False
  
-    await interaction.response.defer(ephemeral=True)
-    await iniciar_reporte(interaction.channel, interaction.user)
+    conversation_state[channel_id] = _crear_estado(user.id)
+    await channel.send(_mensaje_inicio(user))
+    return True
+ 
+ 
+# ================== SLASH ==================
+# Discord exige responder la interacción en < 3 segundos.
+# Si el bot está caído o tarda, el usuario ve: "La aplicación no respondió".
+@bot.tree.command(name="reporte-pesadas", description="Inicia el Reporte de Pesadas")
+async def reporte_pesadas_slash(interaction: discord.Interaction):
+    # 1) Responder YA (antes de cualquier lógica lenta)
     try:
-        await interaction.followup.send("Reporte iniciado en el canal.", ephemeral=True)
+        channel_id = str(interaction.channel.id) if interaction.channel else None
+        if not channel_id:
+            await interaction.response.send_message(
+                "❌ No pude identificar el canal. Usa el comando dentro de #pesadas.",
+                ephemeral=True,
+            )
+            return
+ 
+        if channel_id in conversation_state:
+            dueño = conversation_state[channel_id]["user_id"]
+            await interaction.response.send_message(
+                f"Ya hay un reporte en curso (iniciado por <@{dueño}>).\n"
+                f"Escribe **cancelar reporte** para reiniciar.",
+                ephemeral=True,
+            )
+            return
+ 
+        # Estado + respuesta pública inmediata (cumple el deadline de Discord)
+        conversation_state[channel_id] = _crear_estado(interaction.user.id)
+        await interaction.response.send_message(_mensaje_inicio(interaction.user))
+        print(f"[PESADAS] slash OK user={interaction.user.id} channel={channel_id}")
+ 
+    except discord.errors.NotFound:
+        # Interacción ya expiró (bot muy lento o caído al momento del click)
+        print("[PESADAS] slash NotFound: interacción expirada (>3s)")
+        return
+    except discord.errors.InteractionResponded:
+        # Ya se respondió; intentar followup
+        try:
+            await interaction.followup.send(
+                "El reporte ya se estaba iniciando…", ephemeral=True
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[PESADAS] Error en slash: {e}")
+        traceback.print_exc()
+        # Intentar avisar al usuario si aún no se respondió
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"⚠️ Error al iniciar el reporte: `{type(e).__name__}`. "
+                    f"Prueba escribir: **inicio reporte de pesadas**",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"⚠️ Error: `{type(e).__name__}`. "
+                    f"Prueba: **inicio reporte de pesadas**",
+                    ephemeral=True,
+                )
+        except Exception:
+            pass
+ 
+ 
+@bot.event
+async def on_ready():
+    print(f"✅ Bot conectado como {bot.user} (id={bot.user.id})")
+    print(f"   Guilds: {[g.name for g in bot.guilds]}")
+    try:
+        # Sync global (puede tardar unos minutos en propagarse la 1ª vez)
+        synced = await bot.tree.sync()
+        print(f"✅ {len(synced)} slash commands sincronizados: {[c.name for c in synced]}")
+    except Exception as e:
+        print(f"❌ Error al sincronizar slash: {e}")
+        traceback.print_exc()
+ 
+ 
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    print(f"❌ on_error en {event_method}")
+    traceback.print_exc()
+ 
+ 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: Exception):
+    print(f"❌ Error en app command: {error}")
+    traceback.print_exc()
+    try:
+        msg = (
+            "⚠️ Falló el comando. Escribe en el canal: **inicio reporte de pesadas**"
+        )
+        msg = "⚠️ Falló el comando. Escribe en el canal: **inicio reporte de pesadas**"
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
     except Exception:
         pass
- 
- 
-# ================== COMANDO POR TEXTO ==================
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-async def on_ready():
-    print(f"✅ Bot conectado como {bot.user}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} slash commands sincronizados")
-    except Exception as e:
-        print(f"❌ Error al sincronizar: {e}")
-        traceback.print_exc()
  
  
 @bot.event
@@ -378,7 +385,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
  
-    content = message.content.strip().lower()
     content_lower = (message.content or "").strip().lower()
     channel_id = str(message.channel.id)
     state = conversation_state.get(channel_id)
@@ -386,11 +392,15 @@ async def on_message(message: discord.Message):
     if state and _parece_cancelar(content_lower):
         es_dueño = message.author.id == state["user_id"]
         if es_dueño or content_lower in {"cancelar reporte", "reporte cancelado", "canelar reporte"}:
+        if es_dueño or content_lower in {
+            "cancelar reporte",
+            "reporte cancelado",
+            "canelar reporte",
+        }:
             del conversation_state[channel_id]
             await message.channel.send("✅ Reporte de Pesadas cancelado.")
         return
  
-    if "reporte de pesadas" in content:
     if _parece_inicio(content_lower):
         await iniciar_reporte(message.channel, message.author)
         return
@@ -404,7 +414,6 @@ async def on_message(message: discord.Message):
  
     await manejar_respuesta(message)
  
-    await bot.process_commands(message)
  
 # ================== GROK ==================
 async def consultar_grok(
@@ -421,9 +430,6 @@ Responde ÚNICAMENTE JSON:
   "mensaje": null o "texto corto pidiendo SOLO lo que falta"
 }
  
-@bot.event
-async def on_ready():
-    print(f"✅ Bot conectado como {bot.user}")
 Principios:
 1. Sé RAZONABLE. Evalúa si la INFORMACIÓN está, no si la frase es perfecta.
 2. Números con punto o coma (3.217 / 3,217) son válidos.
@@ -463,8 +469,6 @@ Respuesta NUEVA:
 """
  
     try:
-        synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} slash commands sincronizados correctamente")
         response = client.chat.completions.create(
             model="grok-4-1-fast",
             messages=[
@@ -480,7 +484,6 @@ Respuesta NUEVA:
             "mensaje": data.get("mensaje"),
         }
     except Exception as e:
-        print(f"❌ Error al sincronizar comandos: {e}")
         print(f"Error al consultar Grok: {e}")
         traceback.print_exc()
         if _vacio_o_basura(respuesta_nueva, tiene_adjuntos):
@@ -543,6 +546,9 @@ async def manejar_respuesta(message: discord.Message):
     if tipo == "stock_bajo":
         # "no hay", listas con productos, o 0
         if re.search(r"\bno\s+hay\b|\bninguno\b|\bnada\b|\b0\b", texto.lower()) or _tiene_numero(texto):
+        if re.search(
+            r"\bno\s+hay\b|\bninguno\b|\bnada\b|\b0\b", texto.lower()
+        ) or _tiene_numero(texto):
             if len(texto) >= 3:
                 await _aceptar_y_avanzar(message, state, texto)
                 return
@@ -569,8 +575,6 @@ async def manejar_respuesta(message: discord.Message):
  
     decision = await consultar_grok(item, respuesta_para_ia, buffer_prev, tiene_adjuntos)
  
-# ================== INICIO DEL BOT ==================
-bot.run(TOKEN)
     if not decision.get("respuesta_valida", False):
         state["buffer"] = (buffer_prev + "\n" + texto).strip() if buffer_prev else texto
         msg = decision.get("mensaje") or "Falta un dato. Completa solo lo que falta."
@@ -618,14 +622,7 @@ async def _aceptar_y_avanzar(message: discord.Message, state: dict, texto_final:
         await message.channel.send(
             "✅ **Reporte de Pesadas completado.**\n\n"
             f"Todas las respuestas han sido registradas. ¡Gracias!\n"
+            "Todas las respuestas han sido registradas. ¡Gracias!\n"
             f"_Respondido por <@{state['user_id']}>._"
         )
         print(
-            f"[PESADAS OK] channel={channel_id} "
-            f"answers={json.dumps(state['answers'], ensure_ascii=False)}"
-        )
-        del conversation_state[channel_id]
- 
- 
-# ================== INICIO ==================
-bot.run(DISCORD_TOKEN)
