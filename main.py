@@ -31,8 +31,24 @@ client = OpenAI(
 #   "paso": int,
 #   "answers": { "0": "...", ... },
 #   "buffer": str,
+#   "fotos_tx": None | { productos, idx, paso_foto, capturas },
 # }
 conversation_state = {}
+
+EXT_IMAGEN = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif", ".bmp"}
+PRODUCTOS_TRANSFER_CONOCIDOS = [
+    "crema de leche",
+    "estabilizante",
+    "arequipe",
+    "glucosa",
+    "azúcar",
+    "azucar",
+    "leche",
+    "suero",
+    "cacao",
+    "conos",
+    "cono",
+]
 
 # ================== PREGUNTAS + REGLAS ==================
 # tipo:
@@ -123,7 +139,8 @@ PREGUNTAS = [
             "cacao 1 bulto, estabilizante 0,8515, 1 caja de conos'). "
             "Eso es lo que antes se olvidaba reportar como 'recargas de bultos'. "
             "NO exijas un solo número total. El desglose ES la respuesta correcta. "
-            "Si dice 'sí' sin productos, pide qué y cuánto."
+            "Si dice 'sí' sin productos, pide qué y cuánto. "
+            "NO pidas las fotos aquí: el bot las pide después, producto por producto."
         ),
     },
     {
@@ -270,7 +287,96 @@ def _crear_estado(user_id: int) -> dict:
         "paso": 0,
         "answers": {},
         "buffer": "",
+        "fotos_tx": None,
     }
+
+
+def _es_respuesta_no_transferencia(texto: str) -> bool:
+    """True solo si NO hubo recarga de bultos. Si hay productos, no es un 'no'."""
+    if _productos_locales(texto):
+        return False
+    t = re.sub(r"[¡!?.]", "", (texto or "").strip().lower())
+    if t in {
+        "no",
+        "n",
+        "0",
+        "nop",
+        "ninguno",
+        "ninguna",
+        "nada",
+        "no hubo",
+        "no hubo nada",
+        "sin transferencia",
+    }:
+        return True
+    return bool(re.match(r"^(no hubo|no,?\s*ningun[oa]|sin transfer)\b", t))
+
+
+def _adjuntos_imagen(message: discord.Message) -> list:
+    imgs = []
+    for a in message.attachments or []:
+        nombre = (a.filename or "").lower()
+        ctype = (a.content_type or "").lower()
+        if ctype.startswith("image/") or any(nombre.endswith(ext) for ext in EXT_IMAGEN):
+            imgs.append(a)
+    return imgs
+
+
+def _info_adjunto(adj) -> dict:
+    return {
+        "filename": adj.filename,
+        "url": str(adj.url),
+        "content_type": adj.content_type,
+    }
+
+
+def _titulo_producto(nombre: str) -> str:
+    t = (nombre or "").strip()
+    if not t:
+        return "Producto"
+    bajos = {"de", "del", "la", "el", "y"}
+    partes = []
+    for i, w in enumerate(t.split()):
+        wl = w.lower()
+        if i > 0 and wl in bajos:
+            partes.append(wl)
+        else:
+            partes.append(wl.capitalize() if wl != "azúcar" else "Azúcar")
+    return " ".join(partes)
+
+
+def _productos_locales(texto: str) -> list:
+    t = (texto or "").lower()
+    encontrados = []
+    for p in PRODUCTOS_TRANSFER_CONOCIDOS:
+        if p == "leche":
+            hay = re.search(r"(?<!crema de )\bleche\b", t)
+        else:
+            hay = re.search(rf"\b{re.escape(p)}\b", t)
+        if not hay:
+            continue
+        if p in {"azucar", "azúcar"}:
+            nombre = "Azúcar"
+        elif p in {"cono", "conos"}:
+            nombre = "Conos"
+        else:
+            nombre = _titulo_producto(p)
+        if nombre not in encontrados:
+            encontrados.append(nombre)
+    return encontrados
+
+
+def _texto_pedir_foto(producto: str, cual: str) -> str:
+    if cual == "nuevo":
+        return (
+            f"📦 **Transferencia — {producto}**\n"
+            "Manda la foto del **bulto NUEVO en la báscula**, "
+            "para ver cuánto pesa el contenido neto junto con el empaque."
+        )
+    return (
+        f"📦 **Transferencia — {producto}**\n"
+        "Ahora manda la foto del **empaque VACÍO** cuyo contenido neto se acabó."
+    )
 
 
 async def iniciar_reporte(channel, user: discord.abc.User) -> bool:
@@ -492,11 +598,157 @@ Respuesta NUEVA:
         return {"respuesta_valida": True, "mensaje": None}
 
 
+async def extraer_productos_transferencia(texto: str) -> list:
+    """Nombres de productos recargados. Grok primero; lista conocida de respaldo."""
+    locales = _productos_locales(texto)
+    system_prompt = """
+Eres extractor. El trabajador reportó una transferencia del almacén de bultos
+al almacén de pesadas (se acabó el bulto en uso y se abrió uno nuevo).
+Responde ÚNICAMENTE JSON:
+{ "productos": ["Leche", "Azúcar"] }
+
+Reglas:
+- Lista cada producto distinto que se transfirió/recargó.
+- Nombres cortos: Leche, Azúcar, Suero, Cacao, Arequipe, Estabilizante, Conos, Glucosa.
+- Si dijo que NO hubo transferencia, productos = [].
+- No inventes productos que no estén en el texto.
+- Sin duplicados.
+"""
+    try:
+        response = client.chat.completions.create(
+            model="grok-4-1-fast",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Respuesta:\n\"\"\"{texto}\"\"\""},
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        crudos = data.get("productos") or []
+        limpios = []
+        for p in crudos:
+            n = _titulo_producto(str(p))
+            if n and n not in limpios and n.lower() not in {"no", "ninguno", "nada"}:
+                limpios.append(n)
+        if limpios:
+            return limpios
+    except Exception as e:
+        print(f"Error al extraer productos de transferencia: {e}")
+        traceback.print_exc()
+    return locales
+
+
+async def _iniciar_fotos_transferencia(message: discord.Message, state: dict, texto: str):
+    productos = await extraer_productos_transferencia(texto)
+    if not productos:
+        productos = ["el producto transferido"]
+    state["fotos_tx"] = {
+        "productos": productos,
+        "idx": 0,
+        "paso_foto": "nuevo",
+        "capturas": {},
+    }
+    lista = ", ".join(productos)
+    await message.channel.send(
+        "Hubo transferencia de inventario (se acabó el bulto en uso y se abrió uno nuevo).\n"
+        f"Productos: **{lista}**.\n"
+        "Por cada uno necesito 2 fotos: el **bulto nuevo en la báscula** "
+        "(contenido neto + empaque) y el **empaque vacío** que se acabó."
+    )
+    await message.channel.send(_texto_pedir_foto(productos[0], "nuevo"))
+
+
+async def _avanzar_pregunta(message: discord.Message, state: dict):
+    channel_id = str(message.channel.id)
+    state["paso"] += 1
+    if state["paso"] < len(PREGUNTAS):
+        n = state["paso"] + 1
+        total = len(PREGUNTAS)
+        await message.channel.send(
+            f"**Pregunta {n} de {total}:**\n"
+            f"{PREGUNTAS[state['paso']]['texto']}"
+        )
+        return
+    await message.channel.send(
+        "✅ **Reporte de Pesadas completado.**\n\n"
+        "Todas las respuestas han sido registradas. ¡Gracias!\n"
+        f"_Respondido por <@{state['user_id']}>._"
+    )
+    print(
+        f"[PESADAS OK] channel={channel_id} "
+        f"answers={json.dumps(state['answers'], ensure_ascii=False)}"
+    )
+    del conversation_state[channel_id]
+
+
+async def _siguiente_foto_o_seguir(message: discord.Message, state: dict):
+    ft = state.get("fotos_tx") or {}
+    ft["idx"] = int(ft.get("idx") or 0) + 1
+    ft["paso_foto"] = "nuevo"
+    productos = ft.get("productos") or []
+    if ft["idx"] < len(productos):
+        await message.channel.send(_texto_pedir_foto(productos[ft["idx"]], "nuevo"))
+        return
+    state["answers"]["fotos_transferencia"] = ft.get("capturas") or {}
+    state["fotos_tx"] = None
+    await message.channel.send("Listo, ya tengo las fotos de la transferencia.")
+    await _avanzar_pregunta(message, state)
+
+
+async def manejar_fotos_transferencia(message: discord.Message, state: dict):
+    ft = state.get("fotos_tx")
+    if not ft:
+        return
+    imgs = _adjuntos_imagen(message)
+    if not imgs:
+        await message.channel.send(
+            "Necesito **una foto** (imagen adjunta). "
+            "Tómala y súbela aquí: primero el bulto nuevo en la báscula, "
+            "después el empaque vacío."
+        )
+        return
+
+    productos = ft.get("productos") or ["el producto transferido"]
+    idx = int(ft.get("idx") or 0)
+    if idx < 0 or idx >= len(productos):
+        state["fotos_tx"] = None
+        await _avanzar_pregunta(message, state)
+        return
+
+    producto = productos[idx]
+    paso_foto = ft.get("paso_foto") or "nuevo"
+    capturas = ft.setdefault("capturas", {})
+    slot = capturas.setdefault(producto, {"nuevo": None, "vacio": None})
+
+    try:
+        await message.add_reaction("✅")
+    except Exception:
+        pass
+
+    if paso_foto == "nuevo":
+        slot["nuevo"] = _info_adjunto(imgs[0])
+        if len(imgs) >= 2:
+            slot["vacio"] = _info_adjunto(imgs[1])
+            await _siguiente_foto_o_seguir(message, state)
+            return
+        ft["paso_foto"] = "vacio"
+        await message.channel.send(_texto_pedir_foto(producto, "vacio"))
+        return
+
+    slot["vacio"] = _info_adjunto(imgs[0])
+    await _siguiente_foto_o_seguir(message, state)
+
+
 # ================== MANEJO ==================
 async def manejar_respuesta(message: discord.Message):
     channel_id = str(message.channel.id)
     state = conversation_state.get(channel_id)
     if not state:
+        return
+
+    if state.get("fotos_tx"):
+        await manejar_fotos_transferencia(message, state)
         return
 
     paso = state["paso"]
@@ -524,8 +776,13 @@ async def manejar_respuesta(message: discord.Message):
         await _aceptar_y_avanzar(message, state, texto)
         return
 
-    if tipo in {"abierta", "transferencia", "adicionales"} and sn is False:
+    if tipo in {"abierta", "adicionales"} and sn is False:
         await _aceptar_y_avanzar(message, state, texto)
+        return
+
+    if tipo == "transferencia" and _es_respuesta_no_transferencia(texto):
+        final = ((state.get("buffer") or "") + "\n" + texto).strip()
+        await _aceptar_y_avanzar(message, state, final)
         return
 
     if tipo == "cantidad" and _tiene_numero(texto):
@@ -549,8 +806,9 @@ async def manejar_respuesta(message: discord.Message):
                 return
 
     if tipo in {"adicionales", "transferencia"}:
-        if _tiene_numero(texto) or sn is False:
-            await _aceptar_y_avanzar(message, state, texto)
+        if _tiene_numero(texto) or (tipo == "adicionales" and sn is False):
+            final = ((state.get("buffer") or "") + "\n" + texto).strip()
+            await _aceptar_y_avanzar(message, state, final)
             return
         if sn is True:
             state["buffer"] = ((state.get("buffer") or "") + "\n" + texto).strip()
@@ -591,7 +849,6 @@ async def manejar_respuesta(message: discord.Message):
 
 
 async def _aceptar_y_avanzar(message: discord.Message, state: dict, texto_final: str):
-    channel_id = str(message.channel.id)
     paso = state["paso"]
 
     try:
@@ -601,26 +858,13 @@ async def _aceptar_y_avanzar(message: discord.Message, state: dict, texto_final:
 
     state["answers"][str(paso)] = texto_final
     state["buffer"] = ""
-    state["paso"] = paso + 1
 
-    if state["paso"] < len(PREGUNTAS):
-        n = state["paso"] + 1
-        total = len(PREGUNTAS)
-        await message.channel.send(
-            f"**Pregunta {n} de {total}:**\n"
-            f"{PREGUNTAS[state['paso']]['texto']}"
-        )
-    else:
-        await message.channel.send(
-            "✅ **Reporte de Pesadas completado.**\n\n"
-            "Todas las respuestas han sido registradas. ¡Gracias!\n"
-            f"_Respondido por <@{state['user_id']}>._"
-        )
-        print(
-            f"[PESADAS OK] channel={channel_id} "
-            f"answers={json.dumps(state['answers'], ensure_ascii=False)}"
-        )
-        del conversation_state[channel_id]
+    item = PREGUNTAS[paso] if 0 <= paso < len(PREGUNTAS) else {}
+    if item.get("tipo") == "transferencia" and not _es_respuesta_no_transferencia(texto_final):
+        await _iniciar_fotos_transferencia(message, state, texto_final)
+        return
+
+    await _avanzar_pregunta(message, state)
 
 
 # ================== INICIO ==================
