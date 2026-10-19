@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import os
 import traceback
+import unicodedata
 from openai import OpenAI
 import json
 import re
@@ -49,6 +50,15 @@ PRODUCTOS_TRANSFER_CONOCIDOS = [
     "conos",
     "cono",
 ]
+
+# Los conos se reportan, pero no hay foto que pedir ni que exigir.
+# El emparejamiento (cono/conos, mayúsculas, acentos) vive en _es_producto_conos.
+REGLA_CONOS_SIN_FOTO = (
+    "Los conos (singular o plural: cono/conos; mayúsculas y acentos no importan) "
+    "NO requieren foto. No pidas la foto de los conos y no dejes el reporte "
+    "bloqueado ni incompleto por no tenerla. "
+    "Cualquier otro producto de la transferencia sigue exigiendo sus fotos igual que siempre."
+)
 
 # ================== PREGUNTAS + REGLAS ==================
 # tipo:
@@ -140,7 +150,9 @@ PREGUNTAS = [
             "Eso es lo que antes se olvidaba reportar como 'recargas de bultos'. "
             "NO exijas un solo número total. El desglose ES la respuesta correcta. "
             "Si dice 'sí' sin productos, pide qué y cuánto. "
-            "NO pidas las fotos aquí: el bot las pide después, producto por producto."
+            "NO pidas las fotos aquí: el bot las pide después, producto por producto, "
+            "excepto los conos. "
+            + REGLA_CONOS_SIN_FOTO
         ),
     },
     {
@@ -330,6 +342,60 @@ def _info_adjunto(adj) -> dict:
     }
 
 
+# á/é/í/ó/ú/ü, no la eñe: «coño» no es un cono.
+_TABLA_ACENTOS = str.maketrans(
+    "áéíóúüÁÉÍÓÚÜàèìòùÀÈÌÒÙ",
+    "aeiouuAEIOUUaeiouAEIOU",
+)
+
+
+def _sin_acentos(texto: str) -> str:
+    t = unicodedata.normalize("NFC", texto or "")
+    return t.translate(_TABLA_ACENTOS)
+
+
+def _es_producto_conos(nombre: str) -> bool:
+    """True para cono/conos, sin importar mayúsculas ni acentos.
+
+    Cubre el nombre suelto ("Conos", "CÓNO") y frases ("caja de conos").
+    Esos productos se anotan en el reporte y no piden foto.
+    """
+    n = _sin_acentos(nombre).lower()
+    return re.search(r"\bconos?\b", n) is not None
+
+
+def _productos_que_requieren_foto(productos: list) -> list:
+    """Quita los conos. El resto conserva el orden y sigue pidiendo foto."""
+    return [p for p in productos if p and not _es_producto_conos(str(p))]
+
+
+def _rechazo_pide_foto_de_conos(mensaje: str, texto: str) -> bool:
+    """True si el validador rechazó la respuesta pidiendo foto y el texto trae conos.
+
+    Esa petición no puede frenar el reporte: la cantidad, si falta, se pide aparte.
+    """
+    msg = _sin_acentos(mensaje or "").lower()
+    if not re.search(r"\bfotos?\b|\bimagen(?:es)?\b", msg):
+        return False
+    return any(_es_producto_conos(p) for p in _productos_locales(texto))
+
+
+def _estado_fotos_si_aplica(productos: list) -> Optional[dict]:
+    """Estado de la cola de fotos, o None si no hay nada que fotografiar.
+
+    None (solo conos, o lista vacía) no bloquea el reporte ni lo deja incompleto.
+    """
+    con_foto = _productos_que_requieren_foto(productos)
+    if not con_foto:
+        return None
+    return {
+        "productos": con_foto,
+        "idx": 0,
+        "paso_foto": "nuevo",
+        "capturas": {},
+    }
+
+
 def _titulo_producto(nombre: str) -> str:
     t = (nombre or "").strip()
     if not t:
@@ -346,13 +412,14 @@ def _titulo_producto(nombre: str) -> str:
 
 
 def _productos_locales(texto: str) -> list:
-    t = (texto or "").lower()
+    t = _sin_acentos(texto).lower()
     encontrados = []
     for p in PRODUCTOS_TRANSFER_CONOCIDOS:
-        if p == "leche":
+        p_norm = _sin_acentos(p).lower()
+        if p_norm == "leche":
             hay = re.search(r"(?<!crema de )\bleche\b", t)
         else:
-            hay = re.search(rf"\b{re.escape(p)}\b", t)
+            hay = re.search(rf"\b{re.escape(p_norm)}\b", t)
         if not hay:
             continue
         if p in {"azucar", "azúcar"}:
@@ -520,13 +587,9 @@ async def on_message(message: discord.Message):
 
 
 # ================== GROK ==================
-async def consultar_grok(
-    pregunta_item: dict,
-    respuesta_nueva: str,
-    buffer: str,
-    tiene_adjuntos: bool,
-) -> dict:
-    system_prompt = """
+def _system_prompt_validador() -> str:
+    return (
+        """
 Eres validador del Reporte de Pesadas de una fábrica de helados.
 Responde ÚNICAMENTE JSON:
 {
@@ -547,13 +610,27 @@ Principios:
 10. Nunca digas solo "Responde completo..." sin decir qué falta.
 11. Nunca digas "no me dijiste la cantidad" si hay un dígito claro en el texto.
 12. Punto "." solo → inválido.
+13. """
+        + REGLA_CONOS_SIN_FOTO
+        + """
 
 Errores REALES que debes evitar:
 - Rechazar "3.217 pote / 2N 2C 2G" pidiendo de nuevo el cacao.
 - Rechazar desglose de adicionales pidiendo "un número".
 - Rechazar "Bandejas de un litro no hay".
 - Tragar mensajes de otras personas (eso lo filtra el código; tú solo validas el texto dado).
+- Pedir foto de conos, o tratar la respuesta como incompleta porque no hay foto de conos.
 """
+    )
+
+
+async def consultar_grok(
+    pregunta_item: dict,
+    respuesta_nueva: str,
+    buffer: str,
+    tiene_adjuntos: bool,
+) -> dict:
+    system_prompt = _system_prompt_validador()
 
     user_content = f"""
 Pregunta:
@@ -610,6 +687,7 @@ Responde ÚNICAMENTE JSON:
 Reglas:
 - Lista cada producto distinto que se transfirió/recargó.
 - Nombres cortos: Leche, Azúcar, Suero, Cacao, Arequipe, Estabilizante, Conos, Glucosa.
+- Cono, conos, CONOS o cónos son el mismo producto: usa "Conos". Inclúyelos si aparecen; no pidas foto.
 - Si dijo que NO hubo transferencia, productos = [].
 - No inventes productos que no estén en el texto.
 - Sin duplicados.
@@ -643,20 +721,33 @@ async def _iniciar_fotos_transferencia(message: discord.Message, state: dict, te
     productos = await extraer_productos_transferencia(texto)
     if not productos:
         productos = ["el producto transferido"]
-    state["fotos_tx"] = {
-        "productos": productos,
-        "idx": 0,
-        "paso_foto": "nuevo",
-        "capturas": {},
-    }
-    lista = ", ".join(productos)
+    # Los conos se quedan en la respuesta ya guardada. No entran a la cola
+    # de fotos: ni se piden, ni bloquean, ni dejan el reporte incompleto.
+    habia_conos = any(_es_producto_conos(str(p)) for p in productos)
+    fotos = _estado_fotos_si_aplica(productos)
+    if fotos is None:
+        if habia_conos:
+            await message.channel.send(
+                "Anotado. Los conos no necesitan foto; seguimos con el reporte."
+            )
+        await _avanzar_pregunta(message, state)
+        return
+    state["fotos_tx"] = fotos
+    productos_foto = fotos["productos"]
+    lista = ", ".join(productos_foto)
+    aviso_conos = (
+        "Los conos quedan anotados y no hace falta foto de ellos.\n"
+        if habia_conos
+        else ""
+    )
     await message.channel.send(
         "Hubo transferencia de inventario (se acabó el bulto en uso y se abrió uno nuevo).\n"
         f"Productos: **{lista}**.\n"
+        f"{aviso_conos}"
         "Por cada uno necesito 2 fotos: el **bulto nuevo en la báscula** "
         "(contenido neto + empaque) y el **empaque vacío** que se acabó."
     )
-    await message.channel.send(_texto_pedir_foto(productos[0], "nuevo"))
+    await message.channel.send(_texto_pedir_foto(productos_foto[0], "nuevo"))
 
 
 async def _avanzar_pregunta(message: discord.Message, state: dict):
@@ -687,12 +778,16 @@ async def _siguiente_foto_o_seguir(message: discord.Message, state: dict):
     ft["idx"] = int(ft.get("idx") or 0) + 1
     ft["paso_foto"] = "nuevo"
     productos = ft.get("productos") or []
+    while ft["idx"] < len(productos) and _es_producto_conos(str(productos[ft["idx"]])):
+        ft["idx"] += 1
     if ft["idx"] < len(productos):
         await message.channel.send(_texto_pedir_foto(productos[ft["idx"]], "nuevo"))
         return
-    state["answers"]["fotos_transferencia"] = ft.get("capturas") or {}
+    capturas = ft.get("capturas") or {}
+    if capturas:
+        state["answers"]["fotos_transferencia"] = capturas
+        await message.channel.send("Listo, ya tengo las fotos de la transferencia.")
     state["fotos_tx"] = None
-    await message.channel.send("Listo, ya tengo las fotos de la transferencia.")
     await _avanzar_pregunta(message, state)
 
 
@@ -700,6 +795,13 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
     ft = state.get("fotos_tx")
     if not ft:
         return
+
+    productos = ft.get("productos") or ["el producto transferido"]
+    idx = int(ft.get("idx") or 0)
+    if 0 <= idx < len(productos) and _es_producto_conos(str(productos[idx])):
+        await _siguiente_foto_o_seguir(message, state)
+        return
+
     imgs = _adjuntos_imagen(message)
     if not imgs:
         await message.channel.send(
@@ -828,6 +930,21 @@ async def manejar_respuesta(message: discord.Message):
 
     if not decision.get("respuesta_valida", False):
         state["buffer"] = (buffer_prev + "\n" + texto).strip() if buffer_prev else texto
+        if tipo == "transferencia" and _rechazo_pide_foto_de_conos(
+            decision.get("mensaje") or "", state["buffer"]
+        ):
+            msg_norm = _sin_acentos(decision.get("mensaje") or "").lower()
+            pide_cantidad = re.search(
+                r"\bcantidad\b|\bnumero\b|\bcuanto\b|\bcuantas\b|\bcuantos\b",
+                msg_norm,
+            )
+            if _tiene_numero(state["buffer"]) or not pide_cantidad:
+                await _aceptar_y_avanzar(message, state, state["buffer"])
+                return
+            await message.channel.send(
+                "Indica la cantidad de cada producto. Los conos no necesitan foto."
+            )
+            return
         msg = decision.get("mensaje") or "Falta un dato. Completa solo lo que falta."
         if msg.strip().lower() in {
             "responde completo lo que se te preguntó.",
@@ -868,4 +985,7 @@ async def _aceptar_y_avanzar(message: discord.Message, state: dict, texto_final:
 
 
 # ================== INICIO ==================
-bot.run(DISCORD_TOKEN)
+# Railway arranca este archivo (python main.py). Los tests ponen
+# PESADAS_NO_ARRANCAR=1 para importar la lógica sin conectar a Discord.
+if os.getenv("PESADAS_NO_ARRANCAR") != "1":
+    bot.run(DISCORD_TOKEN)
