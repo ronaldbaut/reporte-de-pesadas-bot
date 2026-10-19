@@ -68,6 +68,18 @@ REGLA_CONOS_SIN_FOTO = (
 #   si_no         → sí/no
 #   stock_bajo    → productos cerca de acabarse (acepta "no hay" = 0)
 #   abierta       → texto libre; "no"/"ninguna" OK
+#   foto          → una imagen adjunta obligatoria; sin ella no avanza ni cierra
+#
+# La foto del material de envasado es un paso fijo (siempre una, siempre
+# obligatoria). Por eso es pregunta numerada y entra en el total: queda
+# como la 18, justo después del sí/no de las tapitas (la 17). No va pegada
+# a la 17 ni a la cola de fotos de la transferencia: esa cola es variable
+# y los conos siguen sin foto.
+TEXTO_FOTO_MATERIAL_ENVASADO = (
+    "📸 Envía una foto de cómo dejaste organizado el material para envasado, "
+    "donde se vean claramente los nombres de las tapitas."
+)
+
 PREGUNTAS = [
     {
         "texto": "¿Con cuánta leche comenzó el día?",
@@ -194,6 +206,17 @@ PREGUNTAS = [
         "texto": "¿Las tapitas están correctamente ordenadas por líneas y sabores?",
         "tipo": "si_no",
         "reglas": "Sí/No válido. Puede reportar un error (ej. tapas de coco en chocooreo).",
+    },
+    {
+        "texto": TEXTO_FOTO_MATERIAL_ENVASADO,
+        "tipo": "foto",
+        "clave": "foto_material_envasado",
+        "reglas": (
+            "Obligatoria. Solo vale con una imagen adjunta. "
+            "Sin esa foto el reporte no avanza ni queda completo. "
+            "Un texto solo, aunque diga que sí, no basta. "
+            "No tiene relación con la foto de transferencia ni con la excepción de conos."
+        ),
     },
     {
         "texto": (
@@ -843,6 +866,33 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
 
 
 # ================== MANEJO ==================
+async def _manejar_foto_obligatoria(
+    message: discord.Message, state: dict, item: dict, texto: str
+):
+    """Cierra el paso solo con una imagen. Sin ella el reporte sigue abierto."""
+    imgs = _adjuntos_imagen(message)
+    if not imgs:
+        await message.channel.send(
+            "Necesito **una foto** (imagen adjunta).\n" + item["texto"]
+        )
+        return
+
+    try:
+        await message.add_reaction("✅")
+    except Exception:
+        pass
+
+    info = _info_adjunto(imgs[0])
+    nota = (texto or "").strip()
+    rotulo = f"[foto: {info['filename']}]"
+    state["answers"][str(state["paso"])] = (
+        f"{nota}\n{rotulo}".strip() if nota else rotulo
+    )
+    state["answers"][item.get("clave") or "foto"] = info
+    state["buffer"] = ""
+    await _avanzar_pregunta(message, state)
+
+
 async def manejar_respuesta(message: discord.Message):
     channel_id = str(message.channel.id)
     state = conversation_state.get(channel_id)
@@ -862,6 +912,12 @@ async def manejar_respuesta(message: discord.Message):
     texto = (message.content or "").strip()
     tiene_adjuntos = bool(message.attachments)
     tipo = item.get("tipo")
+
+    # Antes de los atajos de sí/no y de "ok"/"listo": una foto con esa
+    # palabra igual cuenta, y un "Sí" sin imagen no cierra el reporte.
+    if tipo == "foto":
+        await _manejar_foto_obligatoria(message, state, item, texto)
+        return
 
     if _vacio_o_basura(texto, tiene_adjuntos):
         await message.channel.send(
