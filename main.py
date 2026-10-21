@@ -292,6 +292,15 @@ def _tiene_numero(texto: str) -> bool:
     return re.search(patron, texto) is not None
 
 
+def _es_no_hubo_vasitos(texto: str) -> bool:
+    """True si responde que hoy no se hicieron vasitos / no hay / no (sin foto)."""
+    t = re.sub(r"[^a-z\s]", " ", _sin_acentos((texto or "").lower()))
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t or len(t) > 80:
+        return False
+    return re.match(r"^(no|nop|nada|ninguno|ninguna)\b", t) is not None or "no se hic" in t or "no hubo" in t or "no hay" in t
+
+
 def _es_si_no_corto(texto: str) -> Optional[bool]:
     t = re.sub(r"[¡!?.]", "", (texto or "").strip().lower())
     if t in {"si", "sí", "yes", "s", "1", "correcto"}:
@@ -826,6 +835,16 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
         return
 
     imgs = _adjuntos_imagen(message)
+    if not imgs and item.get("clave") == "foto_material_envasado" and _es_no_hubo_vasitos(texto):
+        state["answers"][str(state["paso"])] = (texto or "").strip() + " [sin foto: no se hicieron vasitos]"
+        state["answers"][item["clave"]] = None
+        state["buffer"] = ""
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            pass
+        await _avanzar_pregunta(message, state)
+        return
     if not imgs:
         await message.channel.send(
             "Necesito **una foto** (imagen adjunta). "
