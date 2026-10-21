@@ -72,7 +72,7 @@ REGLA_CONOS_SIN_FOTO = (
 #
 # La foto del material de envasado es un paso fijo (siempre una, siempre
 # obligatoria). Por eso es pregunta numerada y entra en el total: queda
-# como la 18, justo después del sí/no de las tapitas (la 17). No va pegada
+# como la 19, justo después del sí/no de las tapitas (la 18). No va pegada
 # a la 17 ni a la cola de fotos de la transferencia: esa cola es variable
 # y los conos siguen sin foto.
 TEXTO_FOTO_MATERIAL_ENVASADO = (
@@ -147,6 +147,12 @@ PREGUNTAS = [
             "Número válido, incluido 0 o 0.00 si el pote en uso quedó vacío. "
             "Si aclara potes nuevos aparte, mejor, pero no es obligatorio."
         ),
+    },
+    {
+        "texto": "¿Se desocupó hoy algún envase de arequipe?",
+        "tipo": "envase_arequipe",
+        "clave": "envase_arequipe",
+        "reglas": "Sí/No. Si es sí, el bot pide el peso del envase vacío (número).",
     },
     {
         "texto": (
@@ -332,6 +338,7 @@ def _crear_estado(user_id: int) -> dict:
         "answers": {},
         "buffer": "",
         "fotos_tx": None,
+        "esperando_peso_envase": False,
     }
 
 
@@ -835,16 +842,6 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
         return
 
     imgs = _adjuntos_imagen(message)
-    if not imgs and item.get("clave") == "foto_material_envasado" and _es_no_hubo_vasitos(texto):
-        state["answers"][str(state["paso"])] = (texto or "").strip() + " [sin foto: no se hicieron vasitos]"
-        state["answers"][item["clave"]] = None
-        state["buffer"] = ""
-        try:
-            await message.add_reaction("✅")
-        except Exception:
-            pass
-        await _avanzar_pregunta(message, state)
-        return
     if not imgs:
         await message.channel.send(
             "Necesito **una foto** (imagen adjunta). "
@@ -890,6 +887,16 @@ async def _manejar_foto_obligatoria(
 ):
     """Cierra el paso solo con una imagen. Sin ella el reporte sigue abierto."""
     imgs = _adjuntos_imagen(message)
+    if not imgs and item.get("clave") == "foto_material_envasado" and _es_no_hubo_vasitos(texto):
+        state["answers"][str(state["paso"])] = (texto or "").strip() + " [sin foto: no se hicieron vasitos]"
+        state["answers"][item["clave"]] = None
+        state["buffer"] = ""
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            pass
+        await _avanzar_pregunta(message, state)
+        return
     if not imgs:
         await message.channel.send(
             "Necesito **una foto** (imagen adjunta).\n" + item["texto"]
@@ -910,6 +917,37 @@ async def _manejar_foto_obligatoria(
     state["answers"][item.get("clave") or "foto"] = info
     state["buffer"] = ""
     await _avanzar_pregunta(message, state)
+
+
+TEXTO_PESO_ENVASE_VACIO = "Escribe el peso del envase vacío"
+
+
+async def _manejar_envase_arequipe(message: discord.Message, state: dict, item: dict, texto: str):
+    """Sí → pide el peso del envase vacío (número obligatorio). No → sigue."""
+    if state.get("esperando_peso_envase"):
+        if not _tiene_numero(texto):
+            await message.channel.send("Necesito el peso en número. " + TEXTO_PESO_ENVASE_VACIO)
+            return
+        state["esperando_peso_envase"] = False
+        peso = re.search(r"\d+(?:[.,]\d+)?", texto).group(0)
+        state["answers"][item["clave"]] = {"desocupado": True, "peso_envase_vacio": peso}
+        await _aceptar_y_avanzar(message, state, f"Sí. Peso del envase vacío: {texto.strip()}")
+        return
+    t = _sin_acentos((texto or "").strip().lower())
+    t = re.sub(r"[¡!¿?.,]", "", t).strip()
+    if re.match(r"^(si|s|yes)\b", t):
+        state["esperando_peso_envase"] = True
+        try:
+            await message.add_reaction("✅")
+        except Exception:
+            pass
+        await message.channel.send(TEXTO_PESO_ENVASE_VACIO)
+        return
+    if re.match(r"^(no|n|nop|ninguno|ninguna|nada)\b", t):
+        state["answers"][item["clave"]] = {"desocupado": False, "peso_envase_vacio": None}
+        await _aceptar_y_avanzar(message, state, texto.strip())
+        return
+    await message.channel.send("Responde **Sí** o **No**. " + item["texto"])
 
 
 async def manejar_respuesta(message: discord.Message):
@@ -936,6 +974,10 @@ async def manejar_respuesta(message: discord.Message):
     # palabra igual cuenta, y un "Sí" sin imagen no cierra el reporte.
     if tipo == "foto":
         await _manejar_foto_obligatoria(message, state, item, texto)
+        return
+
+    if tipo == "envase_arequipe" and not _vacio_o_basura(texto, tiene_adjuntos):
+        await _manejar_envase_arequipe(message, state, item, texto)
         return
 
     if _vacio_o_basura(texto, tiene_adjuntos):
