@@ -1,6 +1,6 @@
-"""Foto obligatoria del material para envasado, justo después de la pregunta 17.
+"""Foto obligatoria del material para envasado, justo después de la pregunta 18.
 
-Esa foto es un paso fijo, así que entra en la numeración: pregunta 18 de 21.
+Esa foto es un paso fijo, así que entra en la numeración: pregunta 19 de 22.
 La excepción de conos (sin foto de transferencia) no la cubre ni la anula.
 """
 import asyncio
@@ -81,32 +81,32 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
         main.conversation_state[str(canal.id)] = state
         return state
 
-    def test_la_foto_es_la_pregunta_18_de_21(self):
+    def test_la_foto_es_la_pregunta_19_de_22(self):
         self.assertEqual(main.TEXTO_FOTO_MATERIAL_ENVASADO, TEXTO_FOTO)
-        self.assertEqual(len(main.PREGUNTAS), 21)
+        self.assertEqual(len(main.PREGUNTAS), 22)
 
         self.assertEqual(
             _indice("¿Dejaste las tapitas para los vasitos"),
-            15,
+            16,
         )
         self.assertEqual(
             _indice("¿Las tapitas están correctamente ordenadas"),
-            16,
+            17,
         )
-        self.assertEqual(_indice(TEXTO_FOTO), 17)
-        self.assertEqual(_indice("cerca de acabarse"), 18)
-        self.assertEqual(_indice("incidencia, problema o área de mejora"), 19)
-        self.assertEqual(_indice("Comentarios finales del día"), 20)
+        self.assertEqual(_indice(TEXTO_FOTO), 18)
+        self.assertEqual(_indice("cerca de acabarse"), 19)
+        self.assertEqual(_indice("incidencia, problema o área de mejora"), 20)
+        self.assertEqual(_indice("Comentarios finales del día"), 21)
 
-        foto = main.PREGUNTAS[17]
+        foto = main.PREGUNTAS[18]
         self.assertEqual(foto["tipo"], "foto")
         self.assertEqual(foto["clave"], "foto_material_envasado")
         self.assertEqual(foto["texto"], TEXTO_FOTO)
-        self.assertEqual(main.PREGUNTAS[16]["tipo"], "si_no")
-        self.assertEqual(main.PREGUNTAS[10]["tipo"], "transferencia")
+        self.assertEqual(main.PREGUNTAS[17]["tipo"], "si_no")
+        self.assertEqual(main.PREGUNTAS[11]["tipo"], "transferencia")
 
         inicio = main._mensaje_inicio(Autor())
-        self.assertIn("**Pregunta 1 de 21:**", inicio)
+        self.assertIn("**Pregunta 1 de 22:**", inicio)
         self.assertIn("¿Con cuánta leche comenzó el día?", inicio)
 
     def test_conos_siguen_fuera_de_la_cola_de_transferencia(self):
@@ -119,21 +119,21 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
         self.assertFalse(main._es_producto_conos("material para envasado"))
         self.assertFalse(main._es_producto_conos("tapitas"))
 
-    def test_despues_de_la_17_pide_la_foto_como_18_de_21(self):
-        asyncio.run(self._assert_despues_de_la_17())
+    def test_despues_de_la_18_pide_la_foto_como_19_de_22(self):
+        asyncio.run(self._assert_despues_de_la_18())
 
-    async def _assert_despues_de_la_17(self):
+    async def _assert_despues_de_la_18(self):
         canal = Canal()
-        state = self._estado(canal, 15)
+        state = self._estado(canal, 16)
         await main.manejar_respuesta(Mensaje("Sí", canal))
-        self.assertIn("**Pregunta 17 de 21:**", canal.messages[-1])
+        self.assertIn("**Pregunta 18 de 22:**", canal.messages[-1])
         self.assertIn("correctamente ordenadas por líneas y sabores", canal.messages[-1])
-        self.assertEqual(state["paso"], 16)
+        self.assertEqual(state["paso"], 17)
 
         await main.manejar_respuesta(Mensaje("Sí", canal))
-        self.assertEqual(state["paso"], 17)
-        self.assertEqual(state["answers"]["16"], "Sí")
-        self.assertIn("**Pregunta 18 de 21:**", canal.messages[-1])
+        self.assertEqual(state["paso"], 18)
+        self.assertEqual(state["answers"]["17"], "Sí")
+        self.assertIn("**Pregunta 19 de 22:**", canal.messages[-1])
         self.assertIn(TEXTO_FOTO, canal.messages[-1])
         self.assertNotIn("foto_material_envasado", state["answers"])
 
@@ -142,13 +142,13 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
 
     async def _assert_sin_foto(self):
         canal = Canal()
-        state = self._estado(canal, 17)
-        for texto in ("Sí", "No", "listo", "ya organicé las tapitas", "1 caja de conos", "."):
+        state = self._estado(canal, 18)
+        for texto in ("Sí", "listo", "ya organicé las tapitas", "1 caja de conos", "."):
             await main.manejar_respuesta(Mensaje(texto, canal))
-            self.assertEqual(state["paso"], 17, texto)
+            self.assertEqual(state["paso"], 18, texto)
             self.assertEqual(state["buffer"], "", texto)
             self.assertNotIn("foto_material_envasado", state["answers"])
-            self.assertNotIn("17", state["answers"])
+            self.assertNotIn("18", state["answers"])
             self.assertIn(str(canal.id), main.conversation_state)
             self.assertEqual(
                 canal.messages[-1],
@@ -159,7 +159,7 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
 
         pdf = Adjunto("notas.pdf", "application/pdf")
         await main.manejar_respuesta(Mensaje("ahí va", canal, [pdf]))
-        self.assertEqual(state["paso"], 17)
+        self.assertEqual(state["paso"], 18)
         self.assertNotIn("foto_material_envasado", state["answers"])
         self.assertIn("Necesito **una foto**", canal.messages[-1])
 
@@ -168,7 +168,7 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
 
     async def _assert_con_foto(self):
         canal = Canal()
-        state = self._estado(canal, 17)
+        state = self._estado(canal, 18)
         mensaje = Mensaje(
             "listo",
             canal,
@@ -177,7 +177,7 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
         await main.manejar_respuesta(mensaje)
 
         self.assertEqual(mensaje.reactions, ["✅"])
-        self.assertEqual(state["paso"], 18)
+        self.assertEqual(state["paso"], 19)
         self.assertEqual(state["buffer"], "")
         self.assertEqual(
             state["answers"]["foto_material_envasado"],
@@ -187,16 +187,16 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
                 "content_type": "image/jpeg",
             },
         )
-        self.assertEqual(state["answers"]["17"], "listo\n[foto: tapitas.jpg]")
-        self.assertIn("**Pregunta 19 de 21:**", canal.messages[-1])
+        self.assertEqual(state["answers"]["18"], "listo\n[foto: tapitas.jpg]")
+        self.assertIn("**Pregunta 20 de 22:**", canal.messages[-1])
         self.assertIn("cerca de acabarse", canal.messages[-1])
 
         await main.manejar_respuesta(Mensaje("Bandejas de un litro no hay", canal))
-        self.assertIn("**Pregunta 20 de 21:**", canal.messages[-1])
+        self.assertIn("**Pregunta 21 de 22:**", canal.messages[-1])
         self.assertIn("incidencia", canal.messages[-1])
 
         await main.manejar_respuesta(Mensaje("No", canal))
-        self.assertIn("**Pregunta 21 de 21:**", canal.messages[-1])
+        self.assertIn("**Pregunta 22 de 22:**", canal.messages[-1])
         self.assertIn("Comentarios finales", canal.messages[-1])
 
         await main.manejar_respuesta(Mensaje("No", canal))
@@ -209,35 +209,35 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
 
     async def _assert_solo_imagen(self):
         canal = Canal()
-        state = self._estado(canal, 17)
+        state = self._estado(canal, 18)
         await main.manejar_respuesta(Mensaje("ya organicé", canal))
-        self.assertEqual(state["paso"], 17)
+        self.assertEqual(state["paso"], 18)
 
         adj = Adjunto("organizacion.heic", "image/heic")
         await main.manejar_respuesta(Mensaje("ok", canal, [adj]))
-        self.assertEqual(state["paso"], 18)
-        self.assertEqual(state["answers"]["17"], "ok\n[foto: organizacion.heic]")
+        self.assertEqual(state["paso"], 19)
+        self.assertEqual(state["answers"]["18"], "ok\n[foto: organizacion.heic]")
         self.assertEqual(
             state["answers"]["foto_material_envasado"]["filename"],
             "organizacion.heic",
         )
 
         canal_vacio = Canal(99)
-        state_vacio = self._estado(canal_vacio, 17)
+        state_vacio = self._estado(canal_vacio, 18)
         await main.manejar_respuesta(
             Mensaje("   ", canal_vacio, [Adjunto("solo.webp", "image/webp")])
         )
-        self.assertEqual(state_vacio["paso"], 18)
-        self.assertEqual(state_vacio["answers"]["17"], "[foto: solo.webp]")
+        self.assertEqual(state_vacio["paso"], 19)
+        self.assertEqual(state_vacio["answers"]["18"], "[foto: solo.webp]")
 
     def test_mencionar_conos_no_salta_la_foto_de_envasado(self):
         asyncio.run(self._assert_conos_no_salta_envasado())
 
     async def _assert_conos_no_salta_envasado(self):
         canal = Canal()
-        state = self._estado(canal, 17)
+        state = self._estado(canal, 18)
         await main.manejar_respuesta(Mensaje("también pasé 1 caja de cónos", canal))
-        self.assertEqual(state["paso"], 17)
+        self.assertEqual(state["paso"], 18)
         self.assertIsNone(state["fotos_tx"])
         self.assertNotIn("báscula", "\n".join(canal.messages).lower())
         self.assertIn(TEXTO_FOTO, canal.messages[-1])
@@ -246,7 +246,7 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
             Mensaje("1 caja de conos", canal, [Adjunto("envasado.jpg")])
         )
         self.assertIsNone(state["fotos_tx"])
-        self.assertEqual(state["paso"], 18)
+        self.assertEqual(state["paso"], 19)
         self.assertEqual(
             state["answers"]["foto_material_envasado"]["filename"],
             "envasado.jpg",
@@ -270,8 +270,8 @@ class TestFotoMaterialEnvasado(unittest.TestCase):
         self.assertNotIn("báscula", junto)
         self.assertIn("no necesitan foto", junto)
         self.assertIn("adicionales", canal.messages[-1])
-        self.assertIn("**Pregunta 12 de 21:**", canal.messages[-1])
-        self.assertEqual(main.PREGUNTAS[17]["tipo"], "foto")
+        self.assertIn("**Pregunta 13 de 22:**", canal.messages[-1])
+        self.assertEqual(main.PREGUNTAS[18]["tipo"], "foto")
 
 
 if __name__ == "__main__":
