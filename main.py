@@ -47,6 +47,7 @@ PRODUCTOS_TRANSFER_CONOCIDOS = [
     "leche",
     "suero",
     "cacao",
+    "cocoa",
     "conos",
     "cono",
 ]
@@ -403,6 +404,17 @@ def _es_producto_conos(nombre: str) -> bool:
     return re.search(r"\bconos?\b", n) is not None
 
 
+def _es_producto_cocoa(nombre: str) -> bool:
+    """True si el nombre es o contiene cocoa/cacao, sin mayúsculas ni acentos.
+
+    El reporte ya llama «Cacao» a este producto; quien pide las fotos dice
+    «cocoa». Las dos formas son la misma cosa, también dentro de un nombre
+    más largo («cocoa en polvo», «polvo de cacao»).
+    """
+    n = _sin_acentos(nombre).lower()
+    return re.search(r"cocoa|cacao", n) is not None
+
+
 def _productos_que_requieren_foto(productos: list) -> list:
     """Quita los conos. El resto conserva el orden y sigue pidiendo foto."""
     return [p for p in productos if p and not _es_producto_conos(str(p))]
@@ -465,6 +477,8 @@ def _productos_locales(texto: str) -> list:
             nombre = "Azúcar"
         elif p in {"cono", "conos"}:
             nombre = "Conos"
+        elif p in {"cacao", "cocoa"}:
+            nombre = "Cacao"
         else:
             nombre = _titulo_producto(p)
         if nombre not in encontrados:
@@ -472,16 +486,71 @@ def _productos_locales(texto: str) -> list:
     return encontrados
 
 
+def _nombre_transferencia(nombre: str) -> str:
+    """Título del producto. Cocoa y cacao, sueltos, quedan en «Cacao»."""
+    n = _titulo_producto(nombre)
+    if re.fullmatch(r"cocoa|cacao", _sin_acentos(n).lower()):
+        return "Cacao"
+    return n
+
+
 def _texto_pedir_foto(producto: str, cual: str) -> str:
-    if cual == "nuevo":
-        return (
-            f"📦 **Transferencia — {producto}**\n"
+    if _es_producto_cocoa(producto):
+        if cual == "nuevo":
+            cuerpo = (
+                "Manda la foto del **envase vacío en la báscula**, "
+                "donde se va a colocar la cocoa."
+            )
+        else:
+            cuerpo = (
+                "Ahora manda la foto del **envase con la recarga de cocoa** ya incluida."
+            )
+    elif cual == "nuevo":
+        cuerpo = (
             "Manda la foto del **bulto NUEVO en la báscula**, "
             "para ver cuánto pesa el contenido neto junto con el empaque."
         )
+    else:
+        cuerpo = "Ahora manda la foto del **empaque VACÍO** cuyo contenido neto se acabó."
+    return f"📦 **Transferencia — {producto}**\n{cuerpo}"
+
+
+def _texto_resumen_fotos_transferencia(productos: list) -> str:
+    """Aviso inicial. Sin cocoa queda idéntico al de los demás productos."""
+    clasico = (
+        "Por cada uno necesito 2 fotos: el **bulto nuevo en la báscula** "
+        "(contenido neto + empaque) y el **empaque vacío** que se acabó."
+    )
+    if not productos or not any(_es_producto_cocoa(str(p)) for p in productos):
+        return clasico
+    if all(_es_producto_cocoa(str(p)) for p in productos):
+        return (
+            "Por cada uno necesito 2 fotos: el **envase vacío en la báscula**, "
+            "donde se va a colocar la cocoa, y el **envase con la recarga de cocoa** ya incluida."
+        )
     return (
-        f"📦 **Transferencia — {producto}**\n"
-        "Ahora manda la foto del **empaque VACÍO** cuyo contenido neto se acabó."
+        "Por cada uno necesito 2 fotos. "
+        "En la cocoa: el **envase vacío en la báscula**, donde se va a colocar la cocoa, "
+        "y luego el **envase con la recarga de cocoa** ya incluida. "
+        "En los demás: el **bulto nuevo en la báscula** "
+        "(contenido neto + empaque) y el **empaque vacío** que se acabó."
+    )
+
+
+def _texto_falta_foto_transferencia(producto: str) -> str:
+    if _es_producto_cocoa(producto):
+        pasos = (
+            "primero el envase vacío en la báscula, donde se va a colocar la cocoa, "
+            "después el envase con la recarga de cocoa ya incluida."
+        )
+    else:
+        pasos = (
+            "primero el bulto nuevo en la báscula, "
+            "después el empaque vacío."
+        )
+    return (
+        "Necesito **una foto** (imagen adjunta). "
+        f"Tómala y súbela aquí: {pasos}"
     )
 
 
@@ -727,6 +796,7 @@ Reglas:
 - Lista cada producto distinto que se transfirió/recargó.
 - Nombres cortos: Leche, Azúcar, Suero, Cacao, Arequipe, Estabilizante, Conos, Glucosa.
 - Cono, conos, CONOS o cónos son el mismo producto: usa "Conos". Inclúyelos si aparecen; no pidas foto.
+- Cacao y cocoa (COCOA, cócoa, o un nombre que contenga cocoa) son el mismo producto: usa "Cacao". Si el nombre es más largo y contiene cocoa o cacao, déjalo y no lo partas.
 - Si dijo que NO hubo transferencia, productos = [].
 - No inventes productos que no estén en el texto.
 - Sin duplicados.
@@ -745,7 +815,7 @@ Reglas:
         crudos = data.get("productos") or []
         limpios = []
         for p in crudos:
-            n = _titulo_producto(str(p))
+            n = _nombre_transferencia(str(p))
             if n and n not in limpios and n.lower() not in {"no", "ninguno", "nada"}:
                 limpios.append(n)
         if limpios:
@@ -783,8 +853,7 @@ async def _iniciar_fotos_transferencia(message: discord.Message, state: dict, te
         "Hubo transferencia de inventario (se acabó el bulto en uso y se abrió uno nuevo).\n"
         f"Productos: **{lista}**.\n"
         f"{aviso_conos}"
-        "Por cada uno necesito 2 fotos: el **bulto nuevo en la báscula** "
-        "(contenido neto + empaque) y el **empaque vacío** que se acabó."
+        f"{_texto_resumen_fotos_transferencia(productos_foto)}"
     )
     await message.channel.send(_texto_pedir_foto(productos_foto[0], "nuevo"))
 
@@ -843,11 +912,8 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
 
     imgs = _adjuntos_imagen(message)
     if not imgs:
-        await message.channel.send(
-            "Necesito **una foto** (imagen adjunta). "
-            "Tómala y súbela aquí: primero el bulto nuevo en la báscula, "
-            "después el empaque vacío."
-        )
+        producto_actual = productos[idx] if 0 <= idx < len(productos) else ""
+        await message.channel.send(_texto_falta_foto_transferencia(producto_actual))
         return
 
     productos = ft.get("productos") or ["el producto transferido"]
@@ -860,6 +926,8 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
     producto = productos[idx]
     paso_foto = ft.get("paso_foto") or "nuevo"
     capturas = ft.setdefault("capturas", {})
+    # La 1.ª foto queda en "nuevo" y la 2.ª en "vacio". No hay resta de pesos:
+    # en cocoa esas fotos son el envase vacío y luego el envase con la recarga.
     slot = capturas.setdefault(producto, {"nuevo": None, "vacio": None})
 
     try:
