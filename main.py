@@ -1,8 +1,10 @@
+import base64
 import discord
 from discord.ext import commands
 import os
 import traceback
 import unicodedata
+from decimal import Decimal, ROUND_HALF_UP
 from openai import OpenAI
 import json
 import re
@@ -554,6 +556,289 @@ def _texto_falta_foto_transferencia(producto: str) -> str:
     )
 
 
+_PESO_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _pesos_escritos(texto: str) -> list:
+    """Números de un mensaje, en orden. La coma decimal se conserva."""
+    return _PESO_RE.findall(texto or "")
+
+
+def _decimal_peso(texto: str) -> Optional[Decimal]:
+    if texto is None:
+        return None
+    crudo = str(texto).strip()
+    crudos = _pesos_escritos(crudo)
+    if not crudos:
+        return None
+    try:
+        valor = Decimal(crudos[0].replace(",", "."))
+    except Exception:
+        return None
+    if crudo.startswith("-"):
+        valor = -valor
+    return valor
+
+
+def _lugares_peso(texto: str) -> int:
+    m = _PESO_RE.search(str(texto or ""))
+    if not m:
+        return 0
+    cuerpo = m.group(0)
+    if "," in cuerpo:
+        return len(cuerpo.split(",", 1)[1])
+    if "." in cuerpo:
+        return len(cuerpo.split(".", 1)[1])
+    return 0
+
+
+def _normalizar_peso(valor) -> Optional[str]:
+    """Deja el peso como lo escribió la persona o como lo leyó el modelo."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float)):
+        texto = format(Decimal(str(valor)), "f")
+        if "." in texto:
+            texto = texto.rstrip("0").rstrip(".")
+        return texto or None
+    encontrados = _pesos_escritos(str(valor))
+    return encontrados[0] if encontrados else None
+
+
+def neto_recarga_cocoa(peso_primera: str, peso_segunda: str) -> Optional[str]:
+    """Peso de la 2.ª foto menos el de la 1.ª.
+
+    La 1.ª es el envase vacío y la 2.ª el envase con la recarga.
+    None si falta alguno de los dos números.
+    """
+    if peso_primera is None or peso_segunda is None:
+        return None
+    primera = _decimal_peso(peso_primera)
+    segunda = _decimal_peso(peso_segunda)
+    if primera is None or segunda is None:
+        return None
+    lugares = max(_lugares_peso(peso_primera), _lugares_peso(peso_segunda))
+    cuantia = Decimal(10) ** -lugares
+    neto = (segunda - primera).quantize(cuantia, rounding=ROUND_HALF_UP)
+    texto = format(neto, "f")
+    if "," in f"{peso_primera}{peso_segunda}":
+        texto = texto.replace(".", ",")
+    return texto
+
+
+def _texto_pedir_peso_cocoa(cual: str) -> str:
+    if cual == "nuevo":
+        cual_foto = "envase vacío"
+    else:
+        cual_foto = "envase con la recarga"
+    return (
+        f"No pude leer el peso en la foto del {cual_foto}. "
+        "¿Cuánto marca la báscula? Escríbelo en número."
+    )
+
+
+def _texto_neto_cocoa(producto: str, primera: str, segunda: str, neto: str) -> str:
+    texto = (
+        f"Recarga de cocoa — **{producto}**: **{neto}**.\n"
+        f"Es el peso de la 2.ª foto ({segunda}, envase con la recarga) "
+        f"menos el de la 1.ª ({primera}, envase vacío)."
+    )
+    valor = _decimal_peso(neto)
+    if valor is not None and valor < 0:
+        texto += (
+            "\nEl resultado es negativo; conviene revisar que la 1.ª foto "
+            "sea el envase vacío y la 2.ª el envase con la recarga."
+        )
+    return texto
+
+
+def _anotar_peso_cocoa(slot: dict, cual: str, peso: str) -> None:
+    if cual == "nuevo":
+        slot["peso_envase_vacio"] = peso
+    else:
+        slot["peso_envase_con_recarga"] = peso
+
+
+async def _fuente_imagen(adj) -> Optional[str]:
+    """data URI si se pueden leer los bytes; si no, la URL de la foto."""
+    leer = getattr(adj, "read", None)
+    if callable(leer):
+        try:
+            data = leer()
+            if hasattr(data, "__await__"):
+                data = await data
+            if data:
+                ctype = getattr(adj, "content_type", None) or "image/jpeg"
+                if not str(ctype).startswith("image/"):
+                    ctype = "image/jpeg"
+                encoded = base64.b64encode(data).decode("ascii")
+                return f"data:{ctype};base64,{encoded}"
+        except Exception:
+            pass
+    url = getattr(adj, "url", None)
+    return str(url) if url else None
+
+
+async def leer_peso_en_foto(adj) -> Optional[str]:
+    """Peso que marca la báscula en la foto, o None si no se puede leer."""
+    fuente = await _fuente_imagen(adj)
+    if not fuente:
+        return None
+    try:
+        response = client.chat.completions.create(
+            model="grok-4-1-fast",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "La foto muestra una báscula. "
+                                "Responde ÚNICAMENTE JSON {\"peso\": \"12,35\"} "
+                                "con el número del display, usando el mismo punto o coma que se ve. "
+                                "Si no hay un peso legible, {\"peso\": null}."
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": fuente}},
+                    ],
+                }
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        return _normalizar_peso(data.get("peso"))
+    except Exception as e:
+        print(f"No se pudo leer el peso de la foto: {e}")
+        return None
+
+
+async def _pedir_peso_cocoa(message: discord.Message, ft: dict, cual: str) -> None:
+    ft["esperando_peso"] = cual
+    await message.channel.send(_texto_pedir_peso_cocoa(cual))
+
+
+async def _publicar_neto_cocoa_y_seguir(
+    message: discord.Message, state: dict, producto: str, slot: dict
+) -> None:
+    primera = slot.get("peso_envase_vacio")
+    segunda = slot.get("peso_envase_con_recarga")
+    neto = neto_recarga_cocoa(primera, segunda)
+    ft = state.get("fotos_tx") or {}
+    if not neto:
+        await _pedir_peso_cocoa(
+            message, ft, "nuevo" if not primera else "vacio"
+        )
+        return
+    slot["neto_recarga"] = neto
+    ft["esperando_peso"] = None
+    await message.channel.send(_texto_neto_cocoa(producto, primera, segunda, neto))
+    await _siguiente_foto_o_seguir(message, state)
+
+
+async def _seguir_cocoa_tras_peso(
+    message: discord.Message, state: dict, ft: dict, producto: str, slot: dict
+) -> None:
+    if not slot.get("vacio"):
+        ft["paso_foto"] = "vacio"
+        await message.channel.send(_texto_pedir_foto(producto, "vacio"))
+        return
+    if not slot.get("peso_envase_con_recarga"):
+        await _pedir_peso_cocoa(message, ft, "vacio")
+        return
+    if not slot.get("peso_envase_vacio"):
+        await _pedir_peso_cocoa(message, ft, "nuevo")
+        return
+    await _publicar_neto_cocoa_y_seguir(message, state, producto, slot)
+
+
+async def _recibir_peso_cocoa(
+    message: discord.Message, state: dict, ft: dict, producto: str
+) -> None:
+    """La persona escribe el peso que no se pudo leer en la foto."""
+    cual = ft.get("esperando_peso") or "nuevo"
+    peso = (_pesos_escritos(message.content or "") or [None])[0]
+    imgs = _adjuntos_imagen(message)
+    if not peso and imgs:
+        peso = await leer_peso_en_foto(imgs[0])
+    if not peso:
+        await message.channel.send(_texto_pedir_peso_cocoa(cual))
+        return
+    try:
+        await message.add_reaction("✅")
+    except Exception:
+        pass
+    slot = ft.setdefault("capturas", {}).setdefault(
+        producto, {"nuevo": None, "vacio": None}
+    )
+    if imgs:
+        slot["nuevo" if cual == "nuevo" else "vacio"] = _info_adjunto(imgs[0])
+    _anotar_peso_cocoa(slot, cual, peso)
+    ft["esperando_peso"] = None
+    await _seguir_cocoa_tras_peso(message, state, ft, producto, slot)
+
+
+async def _peso_de_foto_cocoa(adj, escrito: Optional[str]) -> Optional[str]:
+    """El número que escribió la persona, o el que se lee en la báscula."""
+    if escrito:
+        return escrito
+    return await leer_peso_en_foto(adj)
+
+
+async def _manejar_fotos_cocoa(
+    message: discord.Message, state: dict, ft: dict, producto: str, imgs: list
+) -> None:
+    """Guarda las dos fotos y anota la recarga: 2.ª pesada − 1.ª pesada."""
+    try:
+        await message.add_reaction("✅")
+    except Exception:
+        pass
+    slot = ft.setdefault("capturas", {}).setdefault(
+        producto, {"nuevo": None, "vacio": None}
+    )
+    numeros = _pesos_escritos(message.content or "")
+    paso = ft.get("paso_foto") or "nuevo"
+    ft["esperando_peso"] = None
+
+    if paso == "nuevo":
+        slot["nuevo"] = _info_adjunto(imgs[0])
+        peso1 = await _peso_de_foto_cocoa(imgs[0], numeros[0] if numeros else None)
+        if peso1:
+            _anotar_peso_cocoa(slot, "nuevo", peso1)
+        if len(imgs) >= 2:
+            slot["vacio"] = _info_adjunto(imgs[1])
+            escrito2 = numeros[1] if len(numeros) >= 2 else None
+            peso2 = await _peso_de_foto_cocoa(imgs[1], escrito2)
+            if peso2:
+                _anotar_peso_cocoa(slot, "vacio", peso2)
+            if not slot.get("peso_envase_vacio"):
+                await _pedir_peso_cocoa(message, ft, "nuevo")
+                return
+            if not slot.get("peso_envase_con_recarga"):
+                await _pedir_peso_cocoa(message, ft, "vacio")
+                return
+            await _publicar_neto_cocoa_y_seguir(message, state, producto, slot)
+            return
+        if not slot.get("peso_envase_vacio"):
+            await _pedir_peso_cocoa(message, ft, "nuevo")
+            return
+        ft["paso_foto"] = "vacio"
+        await message.channel.send(_texto_pedir_foto(producto, "vacio"))
+        return
+
+    slot["vacio"] = _info_adjunto(imgs[0])
+    peso2 = await _peso_de_foto_cocoa(imgs[0], numeros[0] if numeros else None)
+    if not peso2:
+        await _pedir_peso_cocoa(message, ft, "vacio")
+        return
+    _anotar_peso_cocoa(slot, "vacio", peso2)
+    if not slot.get("peso_envase_vacio"):
+        await _pedir_peso_cocoa(message, ft, "nuevo")
+        return
+    await _publicar_neto_cocoa_y_seguir(message, state, producto, slot)
+
+
 async def iniciar_reporte(channel, user: discord.abc.User) -> bool:
     """Inicia por texto. True si arrancó, False si ya había uno."""
     channel_id = str(channel.id)
@@ -885,6 +1170,7 @@ async def _siguiente_foto_o_seguir(message: discord.Message, state: dict):
     ft = state.get("fotos_tx") or {}
     ft["idx"] = int(ft.get("idx") or 0) + 1
     ft["paso_foto"] = "nuevo"
+    ft["esperando_peso"] = None
     productos = ft.get("productos") or []
     while ft["idx"] < len(productos) and _es_producto_conos(str(productos[ft["idx"]])):
         ft["idx"] += 1
@@ -910,6 +1196,14 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
         await _siguiente_foto_o_seguir(message, state)
         return
 
+    if (
+        ft.get("esperando_peso")
+        and 0 <= idx < len(productos)
+        and _es_producto_cocoa(str(productos[idx]))
+    ):
+        await _recibir_peso_cocoa(message, state, ft, str(productos[idx]))
+        return
+
     imgs = _adjuntos_imagen(message)
     if not imgs:
         producto_actual = productos[idx] if 0 <= idx < len(productos) else ""
@@ -924,10 +1218,13 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
         return
 
     producto = productos[idx]
+    if _es_producto_cocoa(producto):
+        await _manejar_fotos_cocoa(message, state, ft, producto, imgs)
+        return
+
     paso_foto = ft.get("paso_foto") or "nuevo"
     capturas = ft.setdefault("capturas", {})
-    # La 1.ª foto queda en "nuevo" y la 2.ª en "vacio". No hay resta de pesos:
-    # en cocoa esas fotos son el envase vacío y luego el envase con la recarga.
+    # La 1.ª foto queda en "nuevo" y la 2.ª en "vacio". Esos productos no restan pesos.
     slot = capturas.setdefault(producto, {"nuevo": None, "vacio": None})
 
     try:

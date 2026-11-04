@@ -1,9 +1,9 @@
 """En una transferencia de cocoa cambian las dos fotos; el resto no.
 
 La cocoa se pide como envase vacío y luego envase con la recarga.
-Leche, azúcar y los demás siguen con bulto nuevo y empaque vacío.
-No hay cálculo de peso: la primera foto sigue guardándose en "nuevo"
-y la segunda en "vacio".
+La recarga neta es el peso de la 2.ª foto menos el de la 1.ª.
+Leche, azúcar y los demás siguen con bulto nuevo y empaque vacío,
+y no se les resta nada.
 """
 import asyncio
 import contextlib
@@ -89,7 +89,13 @@ class _Resp:
 class TestFotosCocoa(unittest.TestCase):
     def setUp(self):
         self._create = main.client.chat.completions.create
+        self._leer_real = main.leer_peso_en_foto
         main.conversation_state.clear()
+
+        async def _no_lee(adj):
+            return None
+
+        main.leer_peso_en_foto = _no_lee
 
     def _estado(self, canal):
         state = main._crear_estado(7)
@@ -108,6 +114,7 @@ class TestFotosCocoa(unittest.TestCase):
 
     def tearDown(self):
         main.client.chat.completions.create = self._create
+        main.leer_peso_en_foto = self._leer_real
         if hasattr(self, "_extraer_real"):
             main.extraer_productos_transferencia = self._extraer_real
         main.conversation_state.clear()
@@ -269,7 +276,9 @@ class TestFotosCocoa(unittest.TestCase):
         self.assertEqual(state["fotos_tx"]["idx"], 0)
         self.assertEqual(state["fotos_tx"]["paso_foto"], "nuevo")
 
-        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("envase-vacio.jpg")]))
+        await main.manejar_respuesta(
+            Mensaje("1,20 kg", canal, [Adjunto("envase-vacio.jpg")])
+        )
         self.assertEqual(state["fotos_tx"]["paso_foto"], "vacio")
         self.assertEqual(canal.messages[-1], main._texto_pedir_foto("Cacao", "vacio"))
         self.assertIn(FOTO_CON_RECARGA, canal.messages[-1])
@@ -277,9 +286,12 @@ class TestFotosCocoa(unittest.TestCase):
             state["fotos_tx"]["capturas"]["Cacao"]["nuevo"]["filename"],
             "envase-vacio.jpg",
         )
+        self.assertEqual(state["fotos_tx"]["capturas"]["Cacao"]["peso_envase_vacio"], "1,20")
         self.assertIsNone(state["fotos_tx"]["capturas"]["Cacao"]["vacio"])
 
-        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("con-recarga.jpg")]))
+        await main.manejar_respuesta(
+            Mensaje("12,50", canal, [Adjunto("con-recarga.jpg")])
+        )
         self.assertIsNone(state["fotos_tx"])
         guardadas = state["answers"]["fotos_transferencia"]["Cacao"]
         self.assertEqual(guardadas["nuevo"]["filename"], "envase-vacio.jpg")
@@ -287,10 +299,20 @@ class TestFotosCocoa(unittest.TestCase):
         self.assertEqual(set(guardadas["nuevo"]), {"filename", "url", "content_type"})
         self.assertNotIn("peso", guardadas["nuevo"])
         self.assertNotIn("peso", guardadas["vacio"])
+        self.assertEqual(guardadas["peso_envase_vacio"], "1,20")
+        self.assertEqual(guardadas["peso_envase_con_recarga"], "12,50")
+        self.assertEqual(guardadas["neto_recarga"], "11,30")
+        aviso = next(m for m in canal.messages if "Recarga de cocoa" in m)
+        self.assertIn("**11,30**", aviso)
+        self.assertIn("12,50", aviso)
+        self.assertLess(
+            canal.messages.index(aviso),
+            next(i for i, m in enumerate(canal.messages) if "Listo, ya tengo" in m),
+        )
         self.assertIn("Listo, ya tengo las fotos de la transferencia.", canal.messages)
         self.assertIn("adicionales", canal.messages[-1])
 
-    def test_dos_fotos_juntas_siguen_en_nuevo_y_vacio_sin_calcular_peso(self):
+    def test_dos_fotos_juntas_restan_segunda_menos_primera(self):
         asyncio.run(self._assert_dos_juntas())
 
     async def _assert_dos_juntas(self):
@@ -300,15 +322,17 @@ class TestFotosCocoa(unittest.TestCase):
         await main.manejar_respuesta(Mensaje("COCOA 1", canal))
         await main.manejar_respuesta(
             Mensaje(
-                "",
+                "1,20 y 12,50",
                 canal,
                 [Adjunto("envase-vacio.jpg"), Adjunto("con-recarga.jpg")],
             )
         )
         self.assertNotIn(main._texto_pedir_foto("Cacao", "vacio"), canal.messages)
+        self.assertNotIn("No pude leer el peso", "\n".join(canal.messages))
         guardadas = state["answers"]["fotos_transferencia"]["Cacao"]
         self.assertEqual(guardadas["nuevo"]["filename"], "envase-vacio.jpg")
         self.assertEqual(guardadas["vacio"]["filename"], "con-recarga.jpg")
+        self.assertEqual(guardadas["neto_recarga"], "11,30")
         self.assertIsNone(state["fotos_tx"])
 
     def test_mezcla_cambia_solo_la_cocoa(self):
@@ -334,13 +358,16 @@ class TestFotosCocoa(unittest.TestCase):
         self.assertIn("recarga de cocoa", canal.messages[-1])
         self.assertNotIn("bulto nuevo", canal.messages[-1])
 
-        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("envase.jpg")]))
-        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("recarga.jpg")]))
+        await main.manejar_respuesta(Mensaje("2,00", canal, [Adjunto("envase.jpg")]))
+        await main.manejar_respuesta(Mensaje("9,50", canal, [Adjunto("recarga.jpg")]))
         fotos = state["answers"]["fotos_transferencia"]
         self.assertEqual(fotos["Leche"]["nuevo"]["filename"], "leche-nuevo.jpg")
         self.assertEqual(fotos["Leche"]["vacio"]["filename"], "leche-vacio.jpg")
+        self.assertEqual(set(fotos["Leche"]), {"nuevo", "vacio"})
+        self.assertNotIn("neto_recarga", fotos["Leche"])
         self.assertEqual(fotos["Cacao"]["nuevo"]["filename"], "envase.jpg")
         self.assertEqual(fotos["Cacao"]["vacio"]["filename"], "recarga.jpg")
+        self.assertEqual(fotos["Cacao"]["neto_recarga"], "7,50")
 
     def test_nombre_largo_que_contiene_cocoa_usa_los_textos_nuevos(self):
         asyncio.run(self._assert_nombre_largo())
@@ -375,6 +402,149 @@ class TestFotosCocoa(unittest.TestCase):
         self.assertIn("Los conos quedan anotados y no hace falta foto de ellos.", junto)
         self.assertIn(FOTO_ENVASE_VACIO, junto)
         self.assertNotIn("Transferencia — Conos", junto)
+
+    def test_neto_es_segunda_menos_primera(self):
+        self.assertEqual(main.neto_recarga_cocoa("1,20", "12,50"), "11,30")
+        self.assertEqual(main.neto_recarga_cocoa("2.25", "8.5"), "6.25")
+        self.assertEqual(main.neto_recarga_cocoa("3", "10"), "7")
+        self.assertEqual(main.neto_recarga_cocoa("1,2", "3"), "1,8")
+        self.assertEqual(main.neto_recarga_cocoa("5,00", "5,00"), "0,00")
+        self.assertEqual(main.neto_recarga_cocoa("5", "2"), "-3")
+        self.assertIsNone(main.neto_recarga_cocoa("", "2"))
+        self.assertIsNone(main.neto_recarga_cocoa(None, "2"))
+        self.assertNotEqual(
+            main.neto_recarga_cocoa("1,20", "12,50"),
+            main.neto_recarga_cocoa("12,50", "1,20"),
+        )
+
+    def test_la_leche_no_resta_aunque_el_texto_traiga_numeros(self):
+        asyncio.run(self._assert_leche_sin_resta())
+
+    async def _assert_leche_sin_resta(self):
+        self._usar_extractor_local()
+        llamadas = []
+
+        async def _lee(adj):
+            llamadas.append(adj.filename)
+            return "99"
+
+        main.leer_peso_en_foto = _lee
+        canal = Canal()
+        state = self._estado(canal)
+        await main.manejar_respuesta(Mensaje("leche 10", canal))
+        await main.manejar_respuesta(Mensaje("25 kg", canal, [Adjunto("bulto.jpg")]))
+        await main.manejar_respuesta(Mensaje("1 kg", canal, [Adjunto("empaque.jpg")]))
+        leche = state["answers"]["fotos_transferencia"]["Leche"]
+        self.assertEqual(set(leche), {"nuevo", "vacio"})
+        self.assertNotIn("neto_recarga", leche)
+        self.assertNotIn("Recarga de cocoa", "\n".join(canal.messages))
+        self.assertNotIn("No pude leer el peso", "\n".join(canal.messages))
+        self.assertEqual(llamadas, [])
+
+    def test_si_no_se_lee_la_bascula_pide_el_numero_y_luego_resta(self):
+        asyncio.run(self._assert_pide_numero())
+
+    async def _assert_pide_numero(self):
+        self._usar_extractor_local()
+        canal = Canal()
+        state = self._estado(canal)
+        await main.manejar_respuesta(Mensaje("cacao 1", canal))
+        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("vacio.jpg")]))
+        self.assertEqual(state["fotos_tx"]["esperando_peso"], "nuevo")
+        self.assertEqual(
+            canal.messages[-1],
+            main._texto_pedir_peso_cocoa("nuevo"),
+        )
+        await main.manejar_respuesta(Mensaje("no sé", canal))
+        self.assertEqual(state["fotos_tx"]["esperando_peso"], "nuevo")
+        self.assertNotIn("neto_recarga", state["fotos_tx"]["capturas"]["Cacao"])
+
+        await main.manejar_respuesta(Mensaje("1,25 kg", canal))
+        self.assertEqual(canal.messages[-1], main._texto_pedir_foto("Cacao", "vacio"))
+        self.assertIsNone(state["fotos_tx"].get("esperando_peso"))
+
+        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("llena.jpg")]))
+        self.assertEqual(state["fotos_tx"]["esperando_peso"], "vacio")
+        await main.manejar_respuesta(Mensaje("8", canal))
+        guardadas = state["answers"]["fotos_transferencia"]["Cacao"]
+        self.assertEqual(guardadas["peso_envase_vacio"], "1,25")
+        self.assertEqual(guardadas["peso_envase_con_recarga"], "8")
+        self.assertEqual(guardadas["neto_recarga"], "6,75")
+        self.assertNotIn("negativo", "\n".join(canal.messages).lower())
+
+    def test_lee_el_peso_en_la_foto_cuando_nadie_lo_escribe(self):
+        asyncio.run(self._assert_lee_foto())
+
+    async def _assert_lee_foto(self):
+        self._usar_extractor_local()
+
+        async def _lee(adj):
+            return {"vacio.jpg": "1,25", "llena.jpg": "8,00"}[adj.filename]
+
+        main.leer_peso_en_foto = _lee
+        canal = Canal()
+        state = self._estado(canal)
+        await main.manejar_respuesta(Mensaje("cocoa 1", canal))
+        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("vacio.jpg")]))
+        await main.manejar_respuesta(Mensaje("", canal, [Adjunto("llena.jpg")]))
+        self.assertNotIn("No pude leer el peso", "\n".join(canal.messages))
+        guardadas = state["answers"]["fotos_transferencia"]["Cacao"]
+        self.assertEqual(guardadas["neto_recarga"], "6,75")
+        aviso = next(m for m in canal.messages if m.startswith("Recarga de cocoa"))
+        self.assertIn("8,00", aviso)
+        self.assertIn("1,25", aviso)
+        self.assertLess(aviso.find("8,00"), aviso.find("1,25"))
+
+    def test_resultado_negativo_se_reporta_sin_cambiar_el_orden(self):
+        aviso = main._texto_neto_cocoa("Cacao", "12,50", "1,20", "-11,30")
+        self.assertIn("**-11,30**", aviso)
+        self.assertIn("2.ª foto (1,20, envase con la recarga)", aviso)
+        self.assertIn("1.ª (12,50, envase vacío)", aviso)
+        self.assertIn("negativo", aviso)
+
+    def test_leer_peso_en_foto_interpreta_la_respuesta_y_falla_en_silencio(self):
+        asyncio.run(self._assert_lector())
+
+    async def _assert_lector(self):
+        vistos = {}
+
+        def _ok(**kwargs):
+            vistos["kwargs"] = kwargs
+            return _Resp('{"peso": "4,50 kg"}')
+
+        main.client.chat.completions.create = _ok
+        peso = await self._leer_real(Adjunto("bascula.jpg"))
+        self.assertEqual(peso, "4,50")
+        contenido = vistos["kwargs"]["messages"][0]["content"]
+        self.assertEqual(contenido[1]["image_url"]["url"], "https://cdn.example/bascula.jpg")
+
+        class ConBytes(Adjunto):
+            async def read(self):
+                return b"jpeg-bytes"
+
+        def _num(**kwargs):
+            vistos["kwargs"] = kwargs
+            return _Resp('{"peso": 4.5}')
+
+        main.client.chat.completions.create = _num
+        peso = await self._leer_real(ConBytes("bascula.jpg"))
+        self.assertEqual(peso, "4.5")
+        url = vistos["kwargs"]["messages"][0]["content"][1]["image_url"]["url"]
+        self.assertTrue(url.startswith("data:image/jpeg;base64,"))
+
+        def _null(**kwargs):
+            return _Resp('{"peso": null}')
+
+        main.client.chat.completions.create = _null
+        self.assertIsNone(await self._leer_real(Adjunto("oscura.jpg")))
+
+        def _boom(**kwargs):
+            raise RuntimeError("sin red")
+
+        main.client.chat.completions.create = _boom
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            self.assertIsNone(await self._leer_real(Adjunto("oscura.jpg")))
 
 
 if __name__ == "__main__":
