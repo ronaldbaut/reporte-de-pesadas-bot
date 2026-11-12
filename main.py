@@ -1234,10 +1234,6 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
 
     if paso_foto == "nuevo":
         slot["nuevo"] = _info_adjunto(imgs[0])
-        if len(imgs) >= 2:
-            slot["vacio"] = _info_adjunto(imgs[1])
-            await _siguiente_foto_o_seguir(message, state)
-            return
         ft["paso_foto"] = "vacio"
         await message.channel.send(_texto_pedir_foto(producto, "vacio"))
         return
