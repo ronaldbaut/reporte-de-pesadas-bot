@@ -1,11 +1,11 @@
 """Varias fotos en un mismo mensaje.
 
-En leche, el bulto nuevo guarda todas las de ese mensaje y igual pide
-el empaque vacío aparte: ninguna de esas fotos queda como vacío.
+En leche y azúcar, el bulto nuevo guarda todas las de ese mensaje y
+igual pide el empaque vacío aparte: ninguna de esas fotos queda como vacío.
 
 En el empaque vacío de leche, suero y azúcar también se guardan todas.
-Los demás productos, y el bulto nuevo de suero y azúcar, siguen con
-una sola foto: la primera del mensaje.
+Los demás productos, y el bulto nuevo de suero, siguen con una sola
+foto: la primera del mensaje.
 """
 import asyncio
 import os
@@ -235,8 +235,13 @@ class TestFotosTransferenciaUnaPorMensaje(unittest.TestCase):
         self.assertIsNone(state["fotos_tx"])
         self.assertIn("Listo, ya tengo las fotos de la transferencia.", canal.messages)
 
-    def test_suero_y_azucar_en_bulto_nuevo_siguen_con_una_foto(self):
-        for producto in ("Suero", "Azúcar", "azucar", "AZÚCAR"):
+    def test_azucar_en_bulto_nuevo_guarda_las_dos_y_pide_el_vacio(self):
+        for producto in ("Azúcar", "azucar", "AZÚCAR"):
+            with self.subTest(producto=producto):
+                asyncio.run(self._assert_dos_en_nuevo(producto))
+
+    def test_suero_en_bulto_nuevo_sigue_con_una_foto(self):
+        for producto in ("Suero", "SUERO"):
             with self.subTest(producto=producto):
                 asyncio.run(self._assert_nuevo_una(producto))
 

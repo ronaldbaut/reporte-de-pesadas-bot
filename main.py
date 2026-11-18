@@ -420,20 +420,17 @@ def _es_producto_cocoa(nombre: str) -> bool:
 def _varias_fotos_transferencia(producto: str, paso: str) -> bool:
     """True si ese paso guarda todas las fotos del mismo mensaje.
 
-    Leche en el bulto nuevo. Leche, suero y azúcar en el empaque vacío.
+    Leche y azúcar en el bulto nuevo. Leche, suero y azúcar en el empaque vacío.
     Mayúsculas y acentos no importan. Crema de leche no es leche.
     """
     n = _sin_acentos(producto or "").lower()
     es_leche = re.search(r"(?<!crema de )\bleche\b", n) is not None
+    es_azucar = re.search(r"\bazucar\b", n) is not None
     if paso == "nuevo":
-        return es_leche
+        return es_leche or es_azucar
     if paso != "vacio":
         return False
-    return (
-        es_leche
-        or re.search(r"\bsuero\b", n) is not None
-        or re.search(r"\bazucar\b", n) is not None
-    )
+    return es_leche or es_azucar or re.search(r"\bsuero\b", n) is not None
 
 
 def _productos_que_requieren_foto(productos: list) -> list:
