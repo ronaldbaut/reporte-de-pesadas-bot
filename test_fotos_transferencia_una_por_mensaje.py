@@ -1,7 +1,11 @@
-"""Varias fotos en un mensaje no cierran el empaque vacío.
+"""Varias fotos en un mismo mensaje.
 
-En el bulto nuevo solo cuenta la primera y siempre se pide el empaque
-vacío en otro mensaje. En el empaque vacío también solo cuenta la primera.
+En leche y azúcar, el bulto nuevo guarda todas las de ese mensaje y
+igual pide el empaque vacío aparte: ninguna de esas fotos queda como vacío.
+
+En el empaque vacío de leche, suero y azúcar también se guardan todas.
+Los demás productos, y el bulto nuevo de suero, siguen con una sola
+foto: la primera del mensaje.
 """
 import asyncio
 import os
@@ -65,14 +69,16 @@ class TestFotosTransferenciaUnaPorMensaje(unittest.TestCase):
         return state
 
     def test_dos_fotos_en_bulto_nuevo_piden_el_vacio(self):
-        asyncio.run(self._assert_dos_en_nuevo())
+        for producto in ("Leche", "leche", "LECHE"):
+            with self.subTest(producto=producto):
+                asyncio.run(self._assert_dos_en_nuevo(producto))
 
-    async def _assert_dos_en_nuevo(self):
+    async def _assert_dos_en_nuevo(self, producto="Leche"):
         canal = Canal()
         state = self._estado(canal)
         paso = state["paso"]
         state["fotos_tx"] = {
-            "productos": ["Leche"],
+            "productos": [producto],
             "idx": 0,
             "paso_foto": "nuevo",
             "capturas": {},
@@ -85,16 +91,26 @@ class TestFotosTransferenciaUnaPorMensaje(unittest.TestCase):
             )
         )
 
-        slot = state["fotos_tx"]["capturas"]["Leche"]
-        self.assertEqual(slot["nuevo"]["filename"], "bulto-nuevo.jpg")
+        slot = state["fotos_tx"]["capturas"][producto]
+        self.assertEqual(
+            [f["filename"] for f in slot["nuevo"]],
+            ["bulto-nuevo.jpg", "otra-llena.jpg"],
+        )
+        self.assertEqual(
+            [f["url"] for f in slot["nuevo"]],
+            [
+                "https://cdn.example/bulto-nuevo.jpg",
+                "https://cdn.example/otra-llena.jpg",
+            ],
+        )
+        for foto in slot["nuevo"]:
+            self.assertEqual(set(foto), {"filename", "url", "content_type"})
         self.assertIsNone(slot["vacio"])
-        self.assertNotIn("otra-llena.jpg", slot["nuevo"]["filename"])
-        self.assertNotIn("otra-llena.jpg", slot["nuevo"]["url"])
-        self.assertEqual(list(state["fotos_tx"]["capturas"]), ["Leche"])
+        self.assertEqual(list(state["fotos_tx"]["capturas"]), [producto])
         self.assertEqual(state["fotos_tx"]["paso_foto"], "vacio")
         self.assertEqual(state["fotos_tx"]["idx"], 0)
         self.assertEqual(state["paso"], paso)
-        self.assertEqual(canal.messages, [main._texto_pedir_foto("Leche", "vacio")])
+        self.assertEqual(canal.messages, [main._texto_pedir_foto(producto, "vacio")])
         self.assertNotIn("Listo, ya tengo las fotos de la transferencia.", canal.messages)
         self.assertNotIn("fotos_transferencia", state["answers"])
 
@@ -123,7 +139,10 @@ class TestFotosTransferenciaUnaPorMensaje(unittest.TestCase):
         )
 
         slot = state["fotos_tx"]["capturas"]["Leche"]
-        self.assertEqual(slot["nuevo"]["filename"], "bulto-nuevo.jpg")
+        self.assertEqual(
+            [f["filename"] for f in slot["nuevo"]],
+            ["bulto-nuevo.jpg", "segunda.jpg", "tercera.jpg"],
+        )
         self.assertIsNone(slot["vacio"])
         self.assertEqual(canal.messages, [main._texto_pedir_foto("Leche", "vacio")])
         self.assertIsNotNone(state["fotos_tx"])
@@ -153,16 +172,17 @@ class TestFotosTransferenciaUnaPorMensaje(unittest.TestCase):
             Mensaje(
                 "",
                 canal,
-                [Adjunto("empaque-vacio.jpg"), Adjunto("no-es-el-siguiente.jpg")],
+                [Adjunto("empaque-vacio.jpg"), Adjunto("otro-empaque.jpg")],
             )
         )
 
         leche = state["fotos_tx"]["capturas"]["Leche"]
         self.assertEqual(leche["nuevo"]["filename"], "bulto-nuevo.jpg")
-        self.assertEqual(leche["vacio"]["filename"], "empaque-vacio.jpg")
+        self.assertEqual(
+            [f["filename"] for f in leche["vacio"]],
+            ["empaque-vacio.jpg", "otro-empaque.jpg"],
+        )
         self.assertNotIn("Azúcar", state["fotos_tx"]["capturas"])
-        self.assertNotIn("no-es-el-siguiente.jpg", leche["vacio"]["filename"])
-        self.assertNotIn("no-es-el-siguiente.jpg", leche["vacio"]["url"])
         self.assertEqual(state["fotos_tx"]["idx"], 1)
         self.assertEqual(state["fotos_tx"]["paso_foto"], "nuevo")
         self.assertEqual(
@@ -170,6 +190,132 @@ class TestFotosTransferenciaUnaPorMensaje(unittest.TestCase):
             [main._texto_pedir_foto("Azúcar", "nuevo")],
         )
         self.assertNotIn("Listo, ya tengo las fotos de la transferencia.", canal.messages)
+        self.assertNotIn("fotos_transferencia", state["answers"])
+
+    def test_vacio_de_leche_suero_y_azucar_guarda_las_dos_fotos(self):
+        for producto in ("Leche", "Suero", "SUERO", "Azúcar", "azucar", "AZÚCAR"):
+            with self.subTest(producto=producto):
+                asyncio.run(self._assert_vacio_dos_en_reporte(producto))
+
+    async def _assert_vacio_dos_en_reporte(self, producto):
+        canal = Canal()
+        state = self._estado(canal)
+        state["fotos_tx"] = {
+            "productos": [producto],
+            "idx": 0,
+            "paso_foto": "vacio",
+            "capturas": {
+                producto: {
+                    "nuevo": {
+                        "filename": "bulto.jpg",
+                        "url": "https://cdn.example/bulto.jpg",
+                        "content_type": "image/jpeg",
+                    },
+                    "vacio": None,
+                }
+            },
+        }
+        await main.manejar_respuesta(
+            Mensaje("", canal, [Adjunto("vacio-1.jpg"), Adjunto("vacio-2.jpg")])
+        )
+
+        guardadas = state["answers"]["fotos_transferencia"][producto]
+        self.assertEqual(guardadas["nuevo"]["filename"], "bulto.jpg")
+        self.assertEqual(
+            [f["filename"] for f in guardadas["vacio"]],
+            ["vacio-1.jpg", "vacio-2.jpg"],
+        )
+        self.assertEqual(
+            [f["url"] for f in guardadas["vacio"]],
+            [
+                "https://cdn.example/vacio-1.jpg",
+                "https://cdn.example/vacio-2.jpg",
+            ],
+        )
+        self.assertIsNone(state["fotos_tx"])
+        self.assertIn("Listo, ya tengo las fotos de la transferencia.", canal.messages)
+
+    def test_azucar_en_bulto_nuevo_guarda_las_dos_y_pide_el_vacio(self):
+        for producto in ("Azúcar", "azucar", "AZÚCAR"):
+            with self.subTest(producto=producto):
+                asyncio.run(self._assert_dos_en_nuevo(producto))
+
+    def test_suero_en_bulto_nuevo_sigue_con_una_foto(self):
+        for producto in ("Suero", "SUERO"):
+            with self.subTest(producto=producto):
+                asyncio.run(self._assert_nuevo_una(producto))
+
+    async def _assert_nuevo_una(self, producto):
+        canal = Canal()
+        state = self._estado(canal)
+        state["fotos_tx"] = {
+            "productos": [producto],
+            "idx": 0,
+            "paso_foto": "nuevo",
+            "capturas": {},
+        }
+        await main.manejar_respuesta(
+            Mensaje("", canal, [Adjunto("nuevo-1.jpg"), Adjunto("nuevo-2.jpg")])
+        )
+
+        slot = state["fotos_tx"]["capturas"][producto]
+        self.assertEqual(slot["nuevo"]["filename"], "nuevo-1.jpg")
+        self.assertEqual(slot["nuevo"]["url"], "https://cdn.example/nuevo-1.jpg")
+        self.assertNotIn("nuevo-2.jpg", slot["nuevo"]["filename"])
+        self.assertNotIn("nuevo-2.jpg", slot["nuevo"]["url"])
+        self.assertIsNone(slot["vacio"])
+        self.assertEqual(state["fotos_tx"]["paso_foto"], "vacio")
+        self.assertEqual(state["fotos_tx"]["idx"], 0)
+        self.assertEqual(canal.messages, [main._texto_pedir_foto(producto, "vacio")])
+        self.assertNotIn("fotos_transferencia", state["answers"])
+
+    def test_otro_producto_sigue_con_una_foto_por_paso(self):
+        for producto in ("Estabilizante", "Crema de Leche", "Glucosa", "Arequipe"):
+            with self.subTest(producto=producto):
+                asyncio.run(self._assert_una_foto(producto))
+
+    async def _assert_una_foto(self, producto):
+        canal = Canal()
+        state = self._estado(canal)
+        state["fotos_tx"] = {
+            "productos": [producto, "Azúcar"],
+            "idx": 0,
+            "paso_foto": "nuevo",
+            "capturas": {},
+        }
+        await main.manejar_respuesta(
+            Mensaje("", canal, [Adjunto("nuevo-1.jpg"), Adjunto("nuevo-2.jpg")])
+        )
+
+        slot = state["fotos_tx"]["capturas"][producto]
+        self.assertEqual(
+            slot["nuevo"],
+            {
+                "filename": "nuevo-1.jpg",
+                "url": "https://cdn.example/nuevo-1.jpg",
+                "content_type": "image/jpeg",
+            },
+        )
+        self.assertIsNone(slot["vacio"])
+        self.assertEqual(state["fotos_tx"]["paso_foto"], "vacio")
+        self.assertEqual(state["fotos_tx"]["idx"], 0)
+        self.assertEqual(canal.messages, [main._texto_pedir_foto(producto, "vacio")])
+
+        await main.manejar_respuesta(
+            Mensaje("", canal, [Adjunto("vacio-1.jpg"), Adjunto("vacio-2.jpg")])
+        )
+        self.assertEqual(
+            slot["vacio"],
+            {
+                "filename": "vacio-1.jpg",
+                "url": "https://cdn.example/vacio-1.jpg",
+                "content_type": "image/jpeg",
+            },
+        )
+        self.assertNotIn("Azúcar", state["fotos_tx"]["capturas"])
+        self.assertEqual(state["fotos_tx"]["idx"], 1)
+        self.assertEqual(state["fotos_tx"]["paso_foto"], "nuevo")
+        self.assertEqual(canal.messages[-1], main._texto_pedir_foto("Azúcar", "nuevo"))
         self.assertNotIn("fotos_transferencia", state["answers"])
 
 

@@ -417,6 +417,22 @@ def _es_producto_cocoa(nombre: str) -> bool:
     return re.search(r"cocoa|cacao", n) is not None
 
 
+def _varias_fotos_transferencia(producto: str, paso: str) -> bool:
+    """True si ese paso guarda todas las fotos del mismo mensaje.
+
+    Leche y azúcar en el bulto nuevo. Leche, suero y azúcar en el empaque vacío.
+    Mayúsculas y acentos no importan. Crema de leche no es leche.
+    """
+    n = _sin_acentos(producto or "").lower()
+    es_leche = re.search(r"(?<!crema de )\bleche\b", n) is not None
+    es_azucar = re.search(r"\bazucar\b", n) is not None
+    if paso == "nuevo":
+        return es_leche or es_azucar
+    if paso != "vacio":
+        return False
+    return es_leche or es_azucar or re.search(r"\bsuero\b", n) is not None
+
+
 def _productos_que_requieren_foto(productos: list) -> list:
     """Quita los conos. El resto conserva el orden y sigue pidiendo foto."""
     return [p for p in productos if p and not _es_producto_conos(str(p))]
@@ -1224,7 +1240,7 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
 
     paso_foto = ft.get("paso_foto") or "nuevo"
     capturas = ft.setdefault("capturas", {})
-    # La 1.ª foto queda en "nuevo" y la 2.ª en "vacio". Esos productos no restan pesos.
+    # Las fotos de este mensaje son solo de este paso y no restan pesos. El vacío se pide aparte.
     slot = capturas.setdefault(producto, {"nuevo": None, "vacio": None})
 
     try:
@@ -1232,13 +1248,18 @@ async def manejar_fotos_transferencia(message: discord.Message, state: dict):
     except Exception:
         pass
 
+    if _varias_fotos_transferencia(producto, paso_foto) and len(imgs) > 1:
+        info = [_info_adjunto(a) for a in imgs]
+    else:
+        info = _info_adjunto(imgs[0])
+
     if paso_foto == "nuevo":
-        slot["nuevo"] = _info_adjunto(imgs[0])
+        slot["nuevo"] = info
         ft["paso_foto"] = "vacio"
         await message.channel.send(_texto_pedir_foto(producto, "vacio"))
         return
 
-    slot["vacio"] = _info_adjunto(imgs[0])
+    slot["vacio"] = info
     await _siguiente_foto_o_seguir(message, state)
 
 
